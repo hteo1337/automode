@@ -32,13 +32,14 @@ jobs:
             echo "Tag $TAG_VERSION does not match package.json $PKG_VERSION" >&2
             exit 1
           fi
-      - name: Write .npmrc and publish
+      - name: Publish
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cat > "$HOME/.npmrc" <<EOF
-          registry=https://registry.npmjs.org/
-          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
-          always-auth=true
-          EOF
+          # Use npm config set so the token is written literally into .npmrc
+          # without YAML / shell variable expansion surprises.
+          npm config set "//registry.npmjs.org/:_authToken" "$NPM_TOKEN"
+          npm config set "registry" "https://registry.npmjs.org/"
+          # Sanity: confirm whoami works before publishing.
+          npm whoami
           npm publish --access public
