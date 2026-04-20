@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   publish:
@@ -18,8 +17,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-          scope: "@oc-moth"
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -35,6 +32,13 @@ jobs:
             echo "Tag $TAG_VERSION does not match package.json $PKG_VERSION" >&2
             exit 1
           fi
-      - run: npm publish --access public
+      - name: Write .npmrc and publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cat > "$HOME/.npmrc" <<EOF
+          registry=https://registry.npmjs.org/
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          always-auth=true
+          EOF
+          npm publish --access public
