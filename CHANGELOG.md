@@ -4,6 +4,17 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-04-20
+
+### Fixed
+- **CI pipeline end-to-end.** `.github/workflows/publish.yml` now uses
+  `npm config set //registry.npmjs.org/:_authToken` to write the token
+  literally into the runner's `.npmrc`. The previous setup relied on npm's
+  `${VAR}` expansion inside `.npmrc` which wasn't picking up the
+  `NODE_AUTH_TOKEN` env var setup-node wrote (ENEEDAUTH every time).
+  This release is the **first to fully auto-publish from a git tag** —
+  `git push origin vX.Y.Z` → npm within 30s.
+
 ## [0.4.1] — 2026-04-20
 
 ### Fixed
