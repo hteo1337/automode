@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+          scope: "@oc-moth"
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -34,6 +35,6 @@ jobs:
             echo "Tag $TAG_VERSION does not match package.json $PKG_VERSION" >&2
             exit 1
           fi
-      - run: npm publish --access public --provenance
+      - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
