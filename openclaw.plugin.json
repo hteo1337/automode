@@ -2,7 +2,7 @@
   "id": "automode",
   "name": "AutoMode",
   "description": "Autonomous goal-driven execution with multi-agent orchestration, tool allowlisting, and Telegram supervision.",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -55,6 +55,30 @@
         "minimum": 0,
         "maximum": 10,
         "description": "Upper bound on the fallback chain length per ensure-session attempt."
+      },
+      "strictOwner": {
+        "type": "boolean",
+        "default": false,
+        "description": "When true, only the task's original owner can stop/pause/resume it. Others see read-only."
+      },
+      "defaultMode": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Intercept plain (non-slash) messages and route them to automode. Per-chat overrides via /automode on|off.",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "gate": {
+            "enum": ["any", "verb", "length", "verbOrLength"],
+            "default": "verbOrLength",
+            "description": "Which messages actually trigger routing when default-mode is on."
+          },
+          "minWords": { "type": "number", "default": 6, "minimum": 1, "maximum": 50 },
+          "verbs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Verb-prefix allowlist for the 'verb' and 'verbOrLength' gates."
+          }
+        }
       },
       "verbosity": {
         "type": "number",
@@ -210,6 +234,11 @@
     "retryOnErrors": { "label": "Fallback on these errors" },
     "healthProbeEnabled": { "label": "Health probe before each turn" },
     "maxFallbacks": { "label": "Max fallback attempts" },
+    "strictOwner": { "label": "Restrict stop/pause/resume to task owner" },
+    "defaultMode.enabled": { "label": "Route plain messages to automode by default" },
+    "defaultMode.gate": { "label": "Routing gate" },
+    "defaultMode.minWords": { "label": "Gate: min words" },
+    "defaultMode.verbs": { "label": "Gate: verb allowlist" },
     "verbosity": { "label": "Default verbosity (0-3)" },
     "autonomy": { "label": "Default autonomy level" },
     "maxCostUsd": { "label": "Max cost per task (USD, 0 = disabled)" },

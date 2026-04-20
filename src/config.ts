@@ -63,6 +63,18 @@ export const DEFAULT_CONFIG: AutomodeConfig = {
   maxCostUsd: 0,
   auditArgMaxChars: 2000,
   retryBackoffMs: 500,
+  strictOwner: false,
+  defaultMode: {
+    enabled: false,
+    gate: "verbOrLength",
+    minWords: 6,
+    verbs: [
+      "fix", "sort", "handle", "refactor", "implement", "build", "run",
+      "check", "find", "debug", "ship", "watch", "clean", "process",
+      "merge", "review", "deploy", "test", "generate", "update", "upgrade",
+      "investigate", "analyze", "migrate", "write",
+    ],
+  },
 };
 
 export function expandHome(p: string): string {
@@ -91,11 +103,20 @@ export function resolveConfig(raw: unknown, openclawRootConfig?: unknown): Autom
     ? (Math.min(3, Math.max(0, Math.floor(verbosityRaw))) as 0 | 1 | 2 | 3)
     : DEFAULT_CONFIG.verbosity;
   const autonomy = isAutonomyLevel(r.autonomy) ? r.autonomy : DEFAULT_CONFIG.autonomy;
+  const defaultModeRaw = isObject(r.defaultMode) ? r.defaultMode : {};
+  const defaultMode = {
+    ...DEFAULT_CONFIG.defaultMode,
+    ...defaultModeRaw,
+    verbs: Array.isArray(defaultModeRaw.verbs)
+      ? (defaultModeRaw.verbs as unknown[]).filter((v): v is string => typeof v === "string")
+      : DEFAULT_CONFIG.defaultMode.verbs,
+  } as AutomodeConfig["defaultMode"];
   const out: AutomodeConfig = {
     ...DEFAULT_CONFIG,
     ...r,
     verbosity,
     autonomy,
+    defaultMode,
     telegram: { ...DEFAULT_CONFIG.telegram, ...tgRaw },
     retryOnErrors: { ...DEFAULT_CONFIG.retryOnErrors, ...retryRaw } as AutomodeConfig["retryOnErrors"],
     agentRoleMap: { ...DEFAULT_CONFIG.agentRoleMap, ...coerceStringMap(roleRaw) },

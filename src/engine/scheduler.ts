@@ -158,9 +158,26 @@ export class Scheduler {
     return this.store.load(id);
   }
 
-  async stopTask(id: string, reason = "user"): Promise<boolean> {
+  /**
+   * When `strictOwner` is on, mutating operations (stop/pause/resume) are
+   * rejected unless the caller is the task's owner. `requesterId` is
+   * `ctx.senderId` from the command context. Returns null = allowed, or an
+   * error message string when denied.
+   */
+  private checkOwner(state: TaskState, requesterId: string | undefined): string | null {
+    if (!this.cfg.strictOwner) return null;
+    const owner = state.owner?.senderId;
+    if (!owner) return null; // orphan tasks (e.g. from config) are open
+    if (!requesterId) return `task ${state.id} is owned by ${owner}; caller identity unknown`;
+    if (owner !== requesterId) return `task ${state.id} is owned by ${owner}, not ${requesterId}`;
+    return null;
+  }
+
+  async stopTask(id: string, reason = "user", requesterId?: string): Promise<{ ok: boolean; error?: string }> {
     const state = this.store.load(id);
-    if (!state) return false;
+    if (!state) return { ok: false, error: `no task ${id}` };
+    const denied = this.checkOwner(state, requesterId);
+    if (denied) return { ok: false, error: denied };
     const run = this.active.get(id);
     if (run) {
       run.stopRequested = true;
@@ -172,12 +189,14 @@ export class Scheduler {
     state.endedAt = Date.now();
     this.store.save(state);
     await this.notifier.notifyDone(state, "stopped", `Stopped: ${reason}`);
-    return true;
+    return { ok: true };
   }
 
-  async pauseTask(id: string): Promise<boolean> {
+  async pauseTask(id: string, requesterId?: string): Promise<{ ok: boolean; error?: string }> {
     const state = this.store.load(id);
-    if (!state) return false;
+    if (!state) return { ok: false, error: `no task ${id}` };
+    const denied = this.checkOwner(state, requesterId);
+    if (denied) return { ok: false, error: denied };
     const run = this.active.get(id);
     if (run) {
       run.stopRequested = true;
@@ -186,17 +205,21 @@ export class Scheduler {
     }
     state.status = "paused";
     this.store.save(state);
-    return true;
+    return { ok: true };
   }
 
-  async resumeTask(id: string): Promise<boolean> {
+  async resumeTask(id: string, requesterId?: string): Promise<{ ok: boolean; error?: string }> {
     const state = this.store.load(id);
-    if (!state) return false;
-    if (state.status !== "paused" && state.status !== "escalating") return false;
+    if (!state) return { ok: false, error: `no task ${id}` };
+    const denied = this.checkOwner(state, requesterId);
+    if (denied) return { ok: false, error: denied };
+    if (state.status !== "paused" && state.status !== "escalating") {
+      return { ok: false, error: `task ${id} is ${state.status}, cannot resume` };
+    }
     state.status = "running";
     this.store.save(state);
     await this.launch(state);
-    return true;
+    return { ok: true };
   }
 
   async resolveEscalation(

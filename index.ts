@@ -9,6 +9,8 @@ import { parseToolCallText } from "./src/safety/allowlist.js";
 import { Preferences } from "./src/engine/preferences.js";
 import { makeTemplateStore } from "./src/engine/templates.js";
 import { buildMetrics } from "./src/observability/otel.js";
+import { shouldRouteToAutomode } from "./src/engine/default-mode.js";
+import { renderDashboard } from "./src/dashboard/html.js";
 
 type OpenClawPluginApi = {
   logger: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
@@ -283,6 +285,38 @@ export default {
       { priority: 10 },
     );
 
+    // 4.5) Default-to-automode hook.
+    //      Intercepts before_agent_start when the chat (or global config) has
+    //      routing enabled; spawns an automode task and nudges the host agent
+    //      to produce a minimal acknowledgement instead of a full response.
+    api.on?.("before_agent_start", async (event, hctx) => {
+      try {
+        const hookEvent = event as { prompt?: string };
+        const ctxObj = hctx as { channel?: string; senderId?: string; chatId?: string };
+        const chatId = ctxObj.chatId ?? (ctxObj.channel === "telegram" && ctxObj.senderId ? `telegram:${ctxObj.senderId}` : undefined);
+        const decision = shouldRouteToAutomode(hookEvent.prompt ?? "", chatId, cfg, prefs);
+        if (!decision.route) return undefined;
+        const state = await scheduler.startTask({
+          goal: hookEvent.prompt ?? "",
+          mode: "hybrid",
+          chatId,
+          owner: ctxObj.senderId || ctxObj.channel
+            ? { channel: ctxObj.channel, senderId: ctxObj.senderId }
+            : undefined,
+        });
+        log.info(`[automode] default-mode routed message to task ${state.id} (${decision.reason})`);
+        return {
+          systemPrompt:
+            `You are a message router. Respond with exactly one line:\n` +
+            `🤖 Routed to automode task ${state.id}. Watch progress in this chat.\n` +
+            `Do not attempt to answer the user's request — it is being handled autonomously.`,
+        };
+      } catch (err) {
+        log.warn(`[automode] before_agent_start hook error: ${(err as Error).message}`);
+        return undefined;
+      }
+    });
+
     // 5) HTTP route for Telegram button callbacks.
     api.registerHttpRoute?.({
       path: "/automode/cb",
@@ -310,6 +344,31 @@ export default {
           return true;
         } catch (e) {
           log.warn(`[automode] callback handler crashed: ${(e as Error).message}`);
+          return true;
+        }
+      },
+    });
+
+    // 6) Web dashboard — GET /automode/ui renders a single HTML page.
+    api.registerHttpRoute?.({
+      path: "/automode/ui",
+      auth: "gateway",
+      match: "exact",
+      handler: async (_req, res) => {
+        try {
+          const w = res as {
+            statusCode: number;
+            setHeader: (k: string, v: string) => void;
+            end: (b?: string) => void;
+          };
+          const html = renderDashboard(scheduler.list());
+          w.statusCode = 200;
+          w.setHeader("Content-Type", "text/html; charset=utf-8");
+          w.setHeader("Cache-Control", "no-store");
+          w.end(html);
+          return true;
+        } catch (e) {
+          log.warn(`[automode] /automode/ui handler error: ${(e as Error).message}`);
           return true;
         }
       },

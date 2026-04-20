@@ -35,6 +35,16 @@ type MaybeTelegramApi = {
   ) => Promise<SendResult>;
 };
 
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 function resolveTelegramApi(runtime: unknown): MaybeTelegramApi | null {
   const r = runtime as { channel?: { telegram?: MaybeTelegramApi } } | undefined;
   return r?.channel?.telegram ?? null;
@@ -127,9 +137,23 @@ export class TelegramNotifier {
     if (!this.enabled(task)) return undefined;
     const ch = this.resolveChat(task);
     if (!ch) return undefined;
+
+    // 0.4.0: rich progress dashboard with ETA.
+    const started = task.startedAt ?? Date.now();
+    const elapsedMs = Date.now() - started;
+    const avgTurnMs = turn > 0 ? elapsedMs / turn : 0;
+    const turnsLeft = Math.max(0, task.caps.maxTurns - turn);
+    const etaMs = Math.min(
+      avgTurnMs * turnsLeft,
+      Math.max(0, task.caps.maxDurationSec * 1000 - elapsedMs),
+    );
+    const costLine =
+      typeof task.totalCostUsd === "number"
+        ? `$${task.totalCostUsd.toFixed(4)}`
+        : "(n/a)";
     const text = [
-      `🔄 automode \`${task.id}\``,
-      `turn ${turn} / ${task.caps.maxTurns}`,
+      `🔄 automode \`${task.id}\` · turn ${turn}/${task.caps.maxTurns}`,
+      `${task.config.defaultAgent} @ ${task.config.backend} · cost ${costLine} · elapsed ${formatDuration(elapsedMs)} · ETA ~${formatDuration(etaMs)}`,
       ``,
       summary.slice(0, 1200),
     ].join("\n");

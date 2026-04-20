@@ -9,6 +9,8 @@ export type Prefs = {
   verbosity?: VerbosityLevel;
   autonomy?: AutonomyLevel;
   budgetUsd?: number;
+  /** Per-chat default-to-automode override. key = chatId (telegram:xxx), value = true/false. */
+  chatDefaults?: Record<string, boolean>;
   updatedAt?: number;
 };
 

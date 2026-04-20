@@ -72,6 +72,73 @@ function resolveTaskChatId(ctx: CommandCtx, cfg: AutomodeConfig): string | undef
   return cfg.telegram.chatId;
 }
 
+function buildInitWizard(cfg: AutomodeConfig, ctx: CommandCtx, prefs?: Preferences): string {
+  const chatId = resolveTaskChatId(ctx, cfg);
+  const suggestedAgent = cfg.discoveredAcpxAgents[0] ?? "auto";
+  const suggestedAutonomy = cfg.discoveredAcpxAgents.length === 0 ? "strict" : "normal";
+  const lines: string[] = [
+    "# /automode init — host setup snapshot",
+    "",
+    `## Discovered on this host`,
+    `• acpx agents:       [${cfg.discoveredAcpxAgents.join(", ") || "(none — configure plugins.entries.acpx.config.agents)"}]`,
+    `• caller channel:    ${ctx.channel ?? "(unknown)"}${ctx.senderId ? ` / sender ${ctx.senderId}` : ""}`,
+    `• resolved chatId:   ${chatId ?? "(none)"}`,
+    ``,
+    `## Suggested config block`,
+    "Paste this into `plugins.entries.automode.config` in your `openclaw.json`:",
+    "",
+    "```json",
+    JSON.stringify(
+      {
+        defaultAgent: suggestedAgent,
+        backend: suggestedAgent.startsWith("claude") ? "claude-acp" : "acpx",
+        autonomy: suggestedAutonomy,
+        verbosity: 1,
+        maxCostUsd: 5,
+        maxTurns: 50,
+        maxDurationSec: 3600,
+        telegram: {
+          enabled: Boolean(chatId),
+          accountId: cfg.telegram.accountId ?? "default",
+          ...(chatId ? { chatId } : {}),
+        },
+        defaultMode: {
+          enabled: false,
+          gate: "verbOrLength",
+          minWords: 6,
+        },
+      },
+      null,
+      2,
+    ),
+    "```",
+    "",
+    `## Quick sticky setup (no restart needed)`,
+    `  /automode use ${suggestedAgent}`,
+    `  /automode autonomy ${suggestedAutonomy}`,
+    `  /automode budget 5`,
+    `  /automode verbose 1`,
+    chatId ? `  /automode on         # enable default-mode for this chat` : "",
+    ``,
+    `## Validate`,
+    `  /automode doctor`,
+    `  /automode --dry-run "verify plugin boots"`,
+  ];
+  if (prefs) {
+    const p = prefs.get();
+    lines.push(
+      "",
+      "## Current sticky state (per-host)",
+      `• agent:     ${p.defaultAgent ?? "(unset)"}`,
+      `• backend:   ${p.defaultBackend ?? "(unset)"}`,
+      `• autonomy:  ${p.autonomy ?? "(unset)"}`,
+      `• budget:    ${p.budgetUsd ?? "(unset)"}`,
+      `• verbosity: ${p.verbosity ?? "(unset)"}`,
+    );
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
 function tailTask(cfg: AutomodeConfig, args: string): string {
   const parts = args.split(/\s+/).filter(Boolean);
   const wantJson = parts.includes("--json");
@@ -222,7 +289,7 @@ export async function runAutomodeCommand(
   // match a known one, every token becomes input to the flag parser.
   const firstWord = raw.split(/\s+/)[0]?.toLowerCase() ?? "";
   const KNOWN = new Set([
-    "help", "doctor", "diag", "diagnose",
+    "help", "doctor", "diag", "diagnose", "init",
     "status", "ls", "list",
     "stop", "pause", "resume",
     "inspect", "show", "tail", "logs",
@@ -234,6 +301,7 @@ export async function runAutomodeCommand(
     "ledger", "cost",
     "shadow",
     "budget",
+    "on", "off",
   ]);
   if (!KNOWN.has(firstWord)) {
     // Unknown first word → the whole args is a goal. Parse flags from full string.
@@ -301,6 +369,29 @@ export async function runAutomodeCommand(
       if (!prefs) return { text: "preferences store unavailable" };
       prefs.reset();
       return { text: "✅ sticky defaults cleared. Plugin config takes effect again." };
+    }
+    case "on":
+    case "off": {
+      if (!prefs) return { text: "preferences store unavailable" };
+      if (!cfg) return { text: "automode: config not provided" };
+      const chatId = resolveTaskChatId(ctx, cfg);
+      if (!chatId) {
+        return {
+          text: "Cannot enable default-mode for this chat: no chat id could be resolved. Run this from a Telegram DM or set telegram.chatId in the plugin config.",
+        };
+      }
+      const next = { ...(prefs.get().chatDefaults ?? {}), [chatId]: sub === "on" };
+      prefs.set({ chatDefaults: next });
+      return {
+        text:
+          sub === "on"
+            ? `✅ default-to-automode ON for chat \`${chatId}\`. Plain messages now become automode tasks (gate: ${cfg.defaultMode.gate}). Turn off with /automode off.`
+            : `✅ default-to-automode OFF for chat \`${chatId}\`.`,
+      };
+    }
+    case "init": {
+      if (!cfg) return { text: "automode: config not provided" };
+      return { text: buildInitWizard(cfg, ctx, prefs) };
     }
     case "autonomy":
     case "yolo":
@@ -427,20 +518,20 @@ export async function runAutomodeCommand(
     case "stop": {
       const id = tail;
       if (!id) return { text: "Usage: /automode stop <id>" };
-      const ok = await scheduler.stopTask(id, "user");
-      return { text: ok ? `Stopped ${id}.` : `No task ${id}.` };
+      const r = await scheduler.stopTask(id, "user", ctx.senderId);
+      return { text: r.ok ? `Stopped ${id}.` : `✗ ${r.error}` };
     }
     case "pause": {
       const id = tail;
       if (!id) return { text: "Usage: /automode pause <id>" };
-      const ok = await scheduler.pauseTask(id);
-      return { text: ok ? `Paused ${id}.` : `No task ${id}.` };
+      const r = await scheduler.pauseTask(id, ctx.senderId);
+      return { text: r.ok ? `Paused ${id}.` : `✗ ${r.error}` };
     }
     case "resume": {
       const id = tail;
       if (!id) return { text: "Usage: /automode resume <id>" };
-      const ok = await scheduler.resumeTask(id);
-      return { text: ok ? `Resuming ${id}.` : `Cannot resume ${id}.` };
+      const r = await scheduler.resumeTask(id, ctx.senderId);
+      return { text: r.ok ? `Resuming ${id}.` : `✗ ${r.error}` };
     }
     case "inspect":
     case "show": {

@@ -37,6 +37,15 @@ export type AutomodeConfig = {
   maxFallbacks: number;
   verbosity: VerbosityLevel;                // 0 silent … 3 debug
   autonomy: AutonomyLevel;
+  /** If true, non-owners can only inspect tasks (not stop/pause/resume). */
+  strictOwner: boolean;
+  /** Host-wide 'default to automode' behaviour. Overridden by per-chat prefs. */
+  defaultMode: {
+    enabled: boolean;
+    gate: "any" | "verb" | "length" | "verbOrLength";
+    minWords: number;
+    verbs: string[];
+  };
   backend: "acpx" | "claude-acp";
   maxTurns: number;
   maxDurationSec: number;

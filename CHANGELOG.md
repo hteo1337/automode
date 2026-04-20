@@ -4,6 +4,67 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-20
+
+Five features in one release.
+
+### Added — owner ACL
+- **`strictOwner` config flag.** When true, only the user who started a task
+  can stop/pause/resume it. Other callers still see the task via
+  `/automode inspect`, `/automode tail`, `/automode logs`, and the web
+  dashboard. Useful on shared gateways and group chats.
+- `scheduler.stopTask|pauseTask|resumeTask` now return
+  `{ ok: boolean; error?: string }` instead of plain `boolean` so the
+  command surface can show the denial reason.
+
+### Added — first-run wizard
+- **`/automode init`.** Emits a ready-to-paste `plugins.entries.automode.config`
+  block tailored to this host: picks the first discovered acpx agent, pins
+  the computed chat id, pre-fills safe defaults. Also prints a sticky-setup
+  cheat sheet (`/automode use …`, `/automode autonomy …`, etc.) and a
+  validation command. Eliminates the "no acpx agents discovered" and bogus
+  chatId footguns on brand-new installs.
+
+### Added — live progress dashboard (Telegram)
+- The per-turn edit-in-place progress message is now richer:
+  ```
+  🔄 automode \`t…\` · turn 5/50
+  codex @ acpx · cost $0.1612 · elapsed 2m 10s · ETA ~18m
+  …summary…
+  ```
+- ETA is computed from observed average turn duration × remaining turns,
+  clamped by the task's `maxDurationSec` cap. No extra notifications — the
+  dashboard is always an edit of the original progress message.
+
+### Added — default-to-automode
+- Three layers in priority order, **flags → per-chat prefs → plugin config**:
+  - **Per-chat toggle:** `/automode on` enables routing for THIS chat;
+    `/automode off` disables. Stored in `Preferences.chatDefaults` keyed by
+    the resolved chat id.
+  - **Heuristic gate:** `defaultMode.gate` = `any` | `verb` | `length` |
+    `verbOrLength` (default). `verb` requires a known action-verb prefix
+    (configurable list); `length` requires ≥ `minWords` words.
+  - **Host-wide default:** `defaultMode.enabled` in plugin config.
+- Implementation uses OpenClaw's `before_agent_start` hook (that's the only
+  pre-agent hook that can mutate behaviour). When routing fires, a task
+  spawns in the background and the normal agent is steered (via
+  `systemPrompt` override) to respond with a one-line
+  "🤖 Routed to automode task \`t…\`" acknowledgement.
+
+### Added — web dashboard
+- **`GET /automode/ui`** serves a single-file HTML page (no JS framework, no
+  external assets). Shows running/done/failed counts, total cost, and a
+  table of the 200 most recent tasks with status, autonomy, agent@backend,
+  turns, cost, owner, age, and goal. Auto-refreshes every 5s.
+- Auth: `gateway` (uses the normal gateway token so the page is only
+  accessible to authorised callers).
+
+### Changed
+- `Preferences` gains `chatDefaults: Record<chatId, boolean>` for the
+  per-chat toggle.
+- `AutomodeConfig` gains `strictOwner` and `defaultMode` (all with safe
+  defaults — existing configs keep today's behaviour).
+
 ## [0.3.4] — 2026-04-20
 
 ### Fixed — Optional Fix C from the 0.3.3 bug report
