@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+.cache/
+.turbo/
+
+# Per-user state — never commit
+tasks/
+workspace/
+workers/
+claude-config/
+wrapper.sh
+pretooluse-hook.sh
+
+# Backups / local
+*.bak
+*.bak.*
+*.local.*
+*.tmp
+*.tmp.*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp

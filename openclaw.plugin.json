@@ -1,0 +1,232 @@
+{
+  "id": "automode",
+  "name": "AutoMode",
+  "description": "Autonomous goal-driven execution with multi-agent orchestration, tool allowlisting, and Telegram supervision.",
+  "version": "0.3.4",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "defaultAgent": {
+        "type": "string",
+        "default": "auto",
+        "description": "Preferred acpx agent id for each turn. 'auto' picks the first available agent discovered from plugins.entries.acpx.config.agents."
+      },
+      "fallbackAgents": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["auto"],
+        "description": "Ordered list of agents to try if the preferred one fails with a retryable error (rate limit, 5xx, timeout, network, not-found). 'auto' expands to all discovered acpx agents."
+      },
+      "agentRoleMap": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "default": {
+          "general": "auto",
+          "frontend": "auto",
+          "backend": "auto",
+          "test": "auto",
+          "research": "auto",
+          "docs": "auto",
+          "main": "auto"
+        },
+        "description": "Map planner role labels (returned by the planner turn) to concrete acpx agents. 'auto' uses the first discovered agent."
+      },
+      "retryOnErrors": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rateLimited": { "type": "boolean", "default": true },
+          "unhealthy":   { "type": "boolean", "default": true },
+          "notFound":    { "type": "boolean", "default": true },
+          "timeout":     { "type": "boolean", "default": true },
+          "network":     { "type": "boolean", "default": true }
+        },
+        "description": "Which error classes trigger fallback to the next agent in the chain."
+      },
+      "healthProbeEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, call runtime.getStatus before each turn and skip to the next fallback on failure. Adds one round-trip per turn."
+      },
+      "maxFallbacks": {
+        "type": "number",
+        "default": 3,
+        "minimum": 0,
+        "maximum": 10,
+        "description": "Upper bound on the fallback chain length per ensure-session attempt."
+      },
+      "verbosity": {
+        "type": "number",
+        "enum": [0, 1, 2, 3],
+        "default": 1,
+        "description": "Default verbosity level for Telegram updates: 0 silent, 1 summary, 2 +tool calls, 3 +agent output."
+      },
+      "autonomy": {
+        "enum": ["strict", "normal", "high", "yolo", "super-yolo"],
+        "default": "normal",
+        "description": "How aggressively the task proceeds without human input. 'yolo' auto-approves every decision except denied tool calls. 'super-yolo' DISABLES ALL TOOL GUARDS (allowlist, denylist, path-scope). Use only on throwaway machines."
+      },
+      "maxCostUsd": {
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "description": "Stop the task when cumulative cost reaches this USD amount. 0 disables the cap."
+      },
+      "auditArgMaxChars": {
+        "type": "number",
+        "default": 2000,
+        "minimum": 100,
+        "maximum": 20000,
+        "description": "Cap per-tool-call argument length in the audit JSONL; overflow is annotated with +NNN."
+      },
+      "retryBackoffMs": {
+        "type": "number",
+        "default": 500,
+        "minimum": 0,
+        "maximum": 60000,
+        "description": "Base delay between fallback attempts; doubles per attempt, capped at 10s."
+      },
+      "notifiers": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "slack": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled":   { "type": "boolean", "default": false },
+              "channel":   { "type": "string" },
+              "accountId": { "type": "string" }
+            }
+          },
+          "discord": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled":   { "type": "boolean", "default": false },
+              "channel":   { "type": "string" },
+              "accountId": { "type": "string" }
+            }
+          }
+        },
+        "description": "Secondary channels to broadcast lifecycle events. Telegram (primary) is always available."
+      },
+      "backend": {
+        "enum": ["acpx", "claude-acp"],
+        "default": "claude-acp",
+        "description": "ACP runtime backend (claude-acp pool is ~10x faster)."
+      },
+      "maxTurns": {
+        "type": "number",
+        "default": 50,
+        "minimum": 1,
+        "maximum": 500
+      },
+      "maxDurationSec": {
+        "type": "number",
+        "default": 3600,
+        "minimum": 10,
+        "maximum": 86400
+      },
+      "maxParallel": {
+        "type": "number",
+        "default": 3,
+        "minimum": 1,
+        "maximum": 8
+      },
+      "parallelismPolicy": {
+        "enum": ["auto", "ask", "never", "always"],
+        "default": "auto"
+      },
+      "planFirstThreshold": {
+        "type": "number",
+        "default": 0.7,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "allowedTools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [
+          "Read", "Grep", "Glob", "Edit", "Write",
+          "TaskCreate", "TaskUpdate", "TaskList",
+          "NotebookEdit", "Bash"
+        ]
+      },
+      "deniedBashPatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [
+          "^\\s*rm\\s+-rf\\s+[/~]",
+          "^\\s*sudo\\b",
+          "git\\s+push\\s+(-f|--force)",
+          "git\\s+reset\\s+--hard",
+          "curl\\b.*\\|\\s*(bash|sh)\\b",
+          "chmod\\s+777",
+          "^\\s*dd\\s+if=",
+          "mkfs\\.",
+          ":\\(\\)\\{",
+          "\\bkill\\s+-9\\s+1\\b"
+        ]
+      },
+      "telegram": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "accountId": { "type": "string", "default": "default" },
+          "chatId": { "type": "string" }
+        }
+      },
+      "escalationTimeoutSec": {
+        "type": "number",
+        "default": 300,
+        "minimum": 10,
+        "maximum": 86400
+      },
+      "agentRegistryPaths": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["~/.claude/agents", "~/.openclaw/subagents"]
+      },
+      "stateDir": {
+        "type": "string",
+        "default": "~/.openclaw/automode",
+        "description": "Root dir for task state and per-task workspaces."
+      },
+      "schedulerTickMs": {
+        "type": "number",
+        "default": 5000,
+        "minimum": 500,
+        "maximum": 60000
+      }
+    }
+  },
+  "uiHints": {
+    "defaultAgent": { "label": "Default agent", "placeholder": "auto" },
+    "fallbackAgents": { "label": "Fallback agents (ordered)" },
+    "agentRoleMap": { "label": "Planner role → agent map" },
+    "retryOnErrors": { "label": "Fallback on these errors" },
+    "healthProbeEnabled": { "label": "Health probe before each turn" },
+    "maxFallbacks": { "label": "Max fallback attempts" },
+    "verbosity": { "label": "Default verbosity (0-3)" },
+    "autonomy": { "label": "Default autonomy level" },
+    "maxCostUsd": { "label": "Max cost per task (USD, 0 = disabled)" },
+    "auditArgMaxChars": { "label": "Audit: max chars per tool-call arg" },
+    "retryBackoffMs": { "label": "Retry backoff base (ms)" },
+    "backend": { "label": "ACP backend" },
+    "maxTurns": { "label": "Max turns per task" },
+    "maxDurationSec": { "label": "Max task duration (seconds)" },
+    "maxParallel": { "label": "Max parallel workers" },
+    "parallelismPolicy": { "label": "Parallelism policy" },
+    "planFirstThreshold": { "label": "Plan-first confidence threshold (0..1)" },
+    "allowedTools": { "label": "Allowed tools" },
+    "deniedBashPatterns": { "label": "Denied bash patterns (regex)" },
+    "telegram.chatId": { "label": "Telegram chat ID" },
+    "telegram.accountId": { "label": "Telegram account id", "placeholder": "default" },
+    "escalationTimeoutSec": { "label": "Escalation timeout (seconds)" },
+    "agentRegistryPaths": { "label": "Agent registry paths" },
+    "stateDir": { "label": "State directory" }
+  }
+}

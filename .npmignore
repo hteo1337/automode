@@ -1,0 +1,42 @@
+# Tests
+**/*.test.ts
+**/*.test.js
+**/__tests__/**
+vitest.config.*
+
+# Dev tooling
+tsconfig.json
+.editorconfig
+.prettierrc*
+.eslintrc*
+.eslint*.*
+eslint.config.*
+
+# CI + repo metadata
+.github/
+.gitignore
+.gitattributes
+.husky/
+
+# Build / cache / IDE
+node_modules/
+dist/
+coverage/
+.cache/
+.turbo/
+.vscode/
+.idea/
+.DS_Store
+
+# Task state — never ship per-user state
+tasks/
+workspace/
+workers/
+claude-config/
+
+# Backups / local overrides
+*.bak
+*.bak.*
+*.local.*
+*.tmp
+*.tmp.*

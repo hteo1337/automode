@@ -1,0 +1,65 @@
+{
+  "name": "@oc-moth/automode",
+  "version": "0.3.4",
+  "description": "Autonomous focus mode for OpenClaw — goal-driven, multi-agent, tool-allowlisted, Telegram-supervised.",
+  "license": "MIT",
+  "author": "moth",
+  "type": "module",
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "automode",
+    "autonomous",
+    "agent",
+    "acp",
+    "claude-code"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hteo1337/automode.git"
+  },
+  "homepage": "https://github.com/hteo1337/automode#readme",
+  "bugs": {
+    "url": "https://github.com/hteo1337/automode/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "skills/**",
+    "openclaw.plugin.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test -- --run"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "install": {
+      "npmSpec": "@oc-moth/automode",
+      "defaultChoice": "npm"
+    }
+  }
+}
