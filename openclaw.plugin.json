@@ -2,7 +2,7 @@
   "id": "automode",
   "name": "AutoMode",
   "description": "Autonomous goal-driven execution with multi-agent orchestration, tool allowlisting, and Telegram supervision.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

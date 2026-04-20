@@ -4,6 +4,20 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-20
+
+### Fixed
+- **CI publish pipeline validated end-to-end.** First tag-triggered publish
+  attempt on 0.4.0 failed because `setup-node` needed an explicit
+  `scope: "@oc-moth"` for scoped-package auth to route through the
+  generated `.npmrc`. Fix landed in `.github/workflows/publish.yml`; this
+  release is the first to ship via a `git push --tags` alone.
+
+### Docs
+- README adds a "Web dashboard" section with the URL format, default port
+  (`18789`), the 401 = live-route reading, and how to pass the gateway
+  token via `curl` / the OpenClaw TUI.
+
 ## [0.4.0] — 2026-04-20
 
 Five features in one release.
