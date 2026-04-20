@@ -4,7 +4,12 @@ import { parseCallbackData } from "./callbacks.js";
 describe("parseCallbackData", () => {
   it("parses approve", () => {
     const p = parseCallbackData("automode:t123:e456:approve");
-    expect(p).toEqual({ taskId: "t123", escalationId: "e456", decision: "approve" });
+    expect(p).toEqual({ kind: "escalation", taskId: "t123", escalationId: "e456", decision: "approve" });
+  });
+
+  it("returns null for menu callbacks (handled elsewhere)", () => {
+    expect(parseCallbackData("automode:menu:status")).toBeNull();
+    expect(parseCallbackData("automode:menu:autonomy:yolo")).toBeNull();
   });
 
   it("parses deny", () => {

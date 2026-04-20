@@ -11,6 +11,8 @@ import { makeTemplateStore } from "./src/engine/templates.js";
 import { buildMetrics } from "./src/observability/otel.js";
 import { shouldRouteToAutomode } from "./src/engine/default-mode.js";
 import { renderDashboard } from "./src/dashboard/html.js";
+import { buildMenu, parseMenuData, type MenuPage } from "./src/telegram/menu.js";
+import { parseAutonomyLevel } from "./src/engine/autonomy.js";
 
 type OpenClawPluginApi = {
   logger: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
@@ -156,6 +158,14 @@ export default {
       requireAuth: true,
       handler: async (ctx) => {
         try {
+          const raw = (ctx.args ?? "").trim();
+          // Bare `/automode` (or `/automode menu`) on Telegram: send the
+          // inline-keyboard menu. Non-Telegram channels fall through to the
+          // regular command flow (which returns help text for empty args).
+          if ((raw === "" || raw.toLowerCase() === "menu") && ctx.channel === "telegram") {
+            const sent = await sendMenuToTelegram(api.runtime, cfg, ctx, "root", scheduler, prefs, log);
+            return { text: sent ? "" : "automode menu unavailable on this chat" };
+          }
           return await runAutomodeCommand(scheduler, ctx, cfg, log, prefs, templates);
         } catch (e) {
           log.error(`[automode] command failed: ${(e as Error).message}`);
@@ -317,7 +327,8 @@ export default {
       }
     });
 
-    // 5) HTTP route for Telegram button callbacks.
+    // 5) HTTP route for Telegram button callbacks — handles both escalation
+    // decisions and menu-button taps.
     api.registerHttpRoute?.({
       path: "/automode/cb",
       auth: "plugin",
@@ -327,15 +338,38 @@ export default {
           const r = req as { method?: string; body?: unknown; url?: string };
           const w = res as { statusCode: number; setHeader: (k: string, v: string) => void; end: (b?: string) => void };
           let data = "";
+          let fromChatId: string | undefined;
+          let fromMessageId: number | undefined;
           if (typeof r.body === "string") data = r.body;
           else if (r.body && typeof r.body === "object") {
-            const b = r.body as { data?: unknown };
+            const b = r.body as { data?: unknown; chatId?: unknown; messageId?: unknown };
             if (typeof b.data === "string") data = b.data;
+            if (typeof b.chatId === "string") fromChatId = b.chatId;
+            if (typeof b.messageId === "number") fromMessageId = b.messageId;
           }
           if (!data && typeof r.url === "string") {
             const q = r.url.split("?")[1] ?? "";
             const params = new URLSearchParams(q);
             data = params.get("data") ?? "";
+          }
+
+          // Menu callbacks first (different namespace than escalations).
+          const menuPayload = parseMenuData(data);
+          if (menuPayload) {
+            const result = await handleMenuCallback(
+              menuPayload,
+              scheduler,
+              cfg,
+              prefs,
+              api.runtime,
+              fromChatId,
+              fromMessageId,
+              log,
+            );
+            w.statusCode = 200;
+            w.setHeader("Content-Type", "application/json");
+            w.end(JSON.stringify(result));
+            return true;
           }
           const result = await handleCallback(scheduler, data, log);
           w.statusCode = result.ok ? 200 : 400;
@@ -377,6 +411,155 @@ export default {
     log.info(`[automode] ready (${scheduler.list().length} persisted task(s) on disk)`);
   },
 };
+
+type TgApi = {
+  sendMessageTelegram?: (chatId: string, text: string, opts?: unknown) => Promise<{ messageId?: number } | undefined>;
+  editMessageTelegram?: (chatId: string, messageId: number, text: string, opts?: unknown) => Promise<unknown>;
+};
+
+function resolveTgApi(runtime: unknown): TgApi | null {
+  const r = runtime as { channel?: { telegram?: TgApi } } | undefined;
+  return r?.channel?.telegram ?? null;
+}
+
+function resolveChatId(ctx: { channel?: string; senderId?: string }, cfgChatId: string | undefined): string | undefined {
+  if (ctx.channel === "telegram" && ctx.senderId) return `telegram:${ctx.senderId}`;
+  if (ctx.channel && ctx.channel.includes(":")) return ctx.channel;
+  return cfgChatId;
+}
+
+async function sendMenuToTelegram(
+  runtime: unknown,
+  cfg: Parameters<typeof buildMenu>[2],
+  ctx: { channel?: string; senderId?: string },
+  page: MenuPage,
+  scheduler: Parameters<typeof buildMenu>[1],
+  prefs: Parameters<typeof buildMenu>[3],
+  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+): Promise<boolean> {
+  const tg = resolveTgApi(runtime);
+  if (!tg?.sendMessageTelegram) return false;
+  const chatId = resolveChatId(ctx, cfg.telegram.chatId);
+  if (!chatId) return false;
+  const menu = buildMenu(page, scheduler, cfg, prefs);
+  try {
+    await tg.sendMessageTelegram(chatId, menu.text, {
+      accountId: cfg.telegram.accountId,
+      buttons: menu.buttons,
+    });
+    return true;
+  } catch (e) {
+    log.warn(`[automode] menu send failed: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+async function handleMenuCallback(
+  payload: ReturnType<typeof parseMenuData>,
+  scheduler: Parameters<typeof buildMenu>[1],
+  cfg: Parameters<typeof buildMenu>[2],
+  prefs: Parameters<typeof buildMenu>[3],
+  runtime: unknown,
+  chatId: string | undefined,
+  messageId: number | undefined,
+  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+): Promise<{ ok: boolean; text: string }> {
+  if (!payload) return { ok: false, text: "invalid menu payload" };
+  const tg = resolveTgApi(runtime);
+  const effectiveChatId = chatId ?? cfg.telegram.chatId;
+
+  // Edit the menu message to navigate to a different page.
+  if (payload.kind === "nav") {
+    if (!tg?.editMessageTelegram || !effectiveChatId || !messageId) {
+      return { ok: false, text: "cannot edit menu message (missing chatId / messageId)" };
+    }
+    const menu = buildMenu(payload.page as MenuPage, scheduler, cfg, prefs);
+    try {
+      await tg.editMessageTelegram(effectiveChatId, messageId, menu.text, {
+        accountId: cfg.telegram.accountId,
+        buttons: menu.buttons,
+      });
+      return { ok: true, text: `nav → ${payload.page}` };
+    } catch (e) {
+      log.warn(`[automode] menu nav edit failed: ${(e as Error).message}`);
+      return { ok: false, text: (e as Error).message };
+    }
+  }
+
+  // Action leaves: mutate state / dispatch side effect, then update the
+  // menu in place so the user sees the new state.
+  const { action, arg } = payload;
+  switch (action) {
+    case "status":
+    case "help":
+    case "doctor":
+    case "defaults":
+    case "templates":
+    case "ledger":
+    case "newtask": {
+      const hint: Record<string, string> = {
+        status: "Run `/automode status` here for the live list.",
+        help: "Send `/automode help` for the full command list.",
+        doctor: "Run `/automode doctor` to see SDK + agent diagnostics.",
+        defaults: "Run `/automode defaults` to see sticky prefs.",
+        templates: "Run `/automode templates` to list, `/automode template <name>` to start one.",
+        ledger: "Run `/automode ledger [day|week|month|all]` for cost breakdown.",
+        newtask: "Send `/automode <your goal>` to start a task. Or `/automode -y <goal>` for yolo, `/automode --dry-run <goal>` to simulate.",
+      };
+      if (tg?.sendMessageTelegram && effectiveChatId) {
+        await tg.sendMessageTelegram(effectiveChatId, hint[action]!, {
+          accountId: cfg.telegram.accountId,
+        }).catch(() => undefined);
+      }
+      return { ok: true, text: hint[action]! };
+    }
+    case "autonomy": {
+      const level = parseAutonomyLevel(arg ?? "");
+      if (!level) return { ok: false, text: "invalid autonomy level" };
+      prefs?.set({ autonomy: level });
+      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `autonomy → ${level}`);
+    }
+    case "budget": {
+      const n = Number(arg);
+      if (!Number.isFinite(n) || n < 0) return { ok: false, text: "invalid budget" };
+      prefs?.set({ budgetUsd: n });
+      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `budget → $${n.toFixed(2)}`);
+    }
+    case "verbose": {
+      const n = Number(arg);
+      if (!Number.isFinite(n) || n < 0 || n > 3) return { ok: false, text: "invalid verbosity" };
+      prefs?.set({ verbosity: Math.floor(n) as 0 | 1 | 2 | 3 });
+      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `verbosity → ${n}`);
+    }
+    default:
+      return { ok: false, text: `unknown menu action: ${action}` };
+  }
+}
+
+async function rerenderRoot(
+  tg: TgApi | null,
+  chatId: string | undefined,
+  messageId: number | undefined,
+  cfg: Parameters<typeof buildMenu>[2],
+  scheduler: Parameters<typeof buildMenu>[1],
+  prefs: Parameters<typeof buildMenu>[3],
+  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+  note: string,
+): Promise<{ ok: boolean; text: string }> {
+  if (!tg?.editMessageTelegram || !chatId || !messageId) {
+    return { ok: true, text: note };
+  }
+  const menu = buildMenu("root", scheduler, cfg, prefs);
+  try {
+    await tg.editMessageTelegram(chatId, messageId, menu.text, {
+      accountId: cfg.telegram.accountId,
+      buttons: menu.buttons,
+    });
+  } catch (e) {
+    log.warn(`[automode] menu rerender failed: ${(e as Error).message}`);
+  }
+  return { ok: true, text: note };
+}
 
 // Exported for tests.
 export { parseToolCallText };

@@ -2,15 +2,28 @@ import type { Scheduler } from "../engine/scheduler.js";
 
 type AnyLogger = { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 
-export type CallbackPayload = {
+export type EscalationCallbackPayload = {
+  kind: "escalation";
   taskId: string;
   escalationId: string;
   decision: "approve" | "deny" | "stop" | "modify";
   note?: string;
 };
 
-export function parseCallbackData(data: string): CallbackPayload | null {
+// Alias kept for backward compatibility with earlier call sites.
+export type CallbackPayload = EscalationCallbackPayload;
+
+/**
+ * Parse a Telegram button's `callback_data` field.
+ *
+ * Formats:
+ *   - `automode:<taskId>:<escalationId>:<decision>`  → escalation
+ *   - `automode:menu:...` is NOT parsed here; the menu dispatcher handles
+ *     it directly via `parseMenuData` in telegram/menu.ts.
+ */
+export function parseCallbackData(data: string): EscalationCallbackPayload | null {
   if (!data) return null;
+  if (data.startsWith("automode:menu:")) return null;
   const parts = data.split(":");
   if (parts.length < 4 || parts[0] !== "automode") return null;
   const [, taskId, escalationId, decisionRaw] = parts;
@@ -19,7 +32,7 @@ export function parseCallbackData(data: string): CallbackPayload | null {
   if (decision !== "approve" && decision !== "deny" && decision !== "stop" && decision !== "modify") {
     return null;
   }
-  return { taskId, escalationId, decision };
+  return { kind: "escalation", taskId, escalationId, decision };
 }
 
 export async function handleCallback(

@@ -4,6 +4,39 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-04-20
+
+### Added — Telegram inline-keyboard menu
+- **Typing `/automode` with no args in a Telegram chat now sends an
+  interactive menu** instead of raw help text. The menu shows current
+  agent, autonomy, budget, and verbosity in one line; running-task count;
+  and a grid of buttons:
+  - 🚀 New task · 📊 Tasks
+  - 🎯 Autonomy · 💰 Budget · 🔊 Verbose (submenus — edit the message in place)
+  - 📂 Templates · 📒 Ledger
+  - 🩺 Doctor · ⚙️ Defaults · ❓ Help
+- Submenu buttons (e.g. Autonomy → *strict/normal/high/yolo/super-yolo*,
+  Budget → *$1/$5/$25/$100/off*, Verbose → *0/1/2/3*) mutate the sticky
+  prefs and re-render the root menu in place so you see the new state
+  without message spam.
+- "New task" explains the one-liner to type; "Tasks", "Doctor", "Defaults",
+  "Templates", "Ledger", "Help" each nudge you to the corresponding slash
+  command for the richer CLI output.
+- Non-Telegram channels fall back to the original text help.
+- Namespace: menu callbacks are `automode:menu:<action>[:<arg>]`; the
+  escalation callbacks (`automode:<taskId>:<escalationId>:<decision>`) are
+  unchanged and handled by a separate branch in `/automode/cb`.
+
+### Implementation
+- New `src/telegram/menu.ts` with `buildMenu(page, scheduler, cfg, prefs)`
+  returning `{ text, buttons }` and `parseMenuData(cb)` returning
+  `{ kind, action, arg } | { kind, page } | null`. 13 unit tests.
+- `index.ts` detects bare/menu invocations, sends the menu via
+  `api.runtime.channel.telegram.sendMessageTelegram`, and dispatches
+  callback taps through the existing `/automode/cb` HTTP route.
+- `parseCallbackData` in `src/telegram/callbacks.ts` now returns `null`
+  for the menu namespace so the two systems stay cleanly separated.
+
 ## [0.4.2] — 2026-04-20
 
 ### Fixed
