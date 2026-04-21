@@ -5,7 +5,15 @@ import { sdkPreflight } from "./agents/dispatcher.js";
 import { findOpenclawRoots } from "./agents/sdk-loader.js";
 import { Preferences, inferBackend } from "./engine/preferences.js";
 import { parseFlags } from "./flags.js";
-import { renderGoal, type TemplateStore } from "./engine/templates.js";
+import { renderGoal, EDITABLE_FIELDS, type TemplateStore } from "./engine/templates.js";
+
+function stripOuterQuotes(s: string): string {
+  const t = s.trim();
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
 import { buildLedger, formatLedger, type LedgerWindow } from "./engine/ledger.js";
 import { tailLogsForTask } from "./engine/logs.js";
 import type {
@@ -298,6 +306,7 @@ export async function runAutomodeCommand(
     "verbose", "verbosity",
     "autonomy", "yolo", "super-yolo", "unsafe",
     "template", "templates",
+    "template-new", "template-set", "template-delete", "template-rm", "template-clone",
     "ledger", "cost",
     "shadow",
     "budget",
@@ -474,6 +483,67 @@ export async function runAutomodeCommand(
       if (!cfg) return { text: "automode: config not provided" };
       return handleTemplate(scheduler, ctx, cfg, prefs, templates, tail, subFlags);
     }
+    case "template-new": {
+      if (!templates) return { text: "automode: template store unavailable" };
+      const name = tail.split(/\s+/)[0]?.trim();
+      if (!name) return { text: "Usage: /automode template-new <name>" };
+      const r = templates.create(name);
+      return {
+        text: r.ok
+          ? `✅ created user template '${name}' at ${r.path}\nPopulate it with /automode template-set ${name} <field> <value>\nFields: ${EDITABLE_FIELDS.join(", ")}`
+          : `✗ ${r.error}`,
+      };
+    }
+    case "template-set": {
+      if (!templates) return { text: "automode: template store unavailable" };
+      // tail = "<name> <field> <value...>"
+      const parts = tail.split(/\s+/);
+      const name = parts[0]?.trim();
+      const field = parts[1]?.trim();
+      const value = parts.slice(2).join(" ").trim();
+      if (!name || !field || !value) {
+        return {
+          text: [
+            "Usage: /automode template-set <name> <field> <value>",
+            `Fields: ${EDITABLE_FIELDS.join(", ")}`,
+            "Examples:",
+            '  /automode template-set mine goalTemplate "fix failing tests in {{arg}}"',
+            "  /automode template-set mine autonomy high",
+            "  /automode template-set mine maxCostUsd 2",
+          ].join("\n"),
+        };
+      }
+      const r = templates.update(name, field, stripOuterQuotes(value));
+      return { text: r.ok ? `✅ ${name}.${field} = ${value}` : `✗ ${r.error}` };
+    }
+    case "template-delete":
+    case "template-rm": {
+      if (!templates) return { text: "automode: template store unavailable" };
+      const name = tail.split(/\s+/)[0]?.trim();
+      if (!name) return { text: "Usage: /automode template-delete <name>" };
+      const r = templates.remove(name);
+      return { text: r.ok ? `🗑  deleted user template '${name}'` : `✗ ${r.error}` };
+    }
+    case "template-clone": {
+      if (!templates) return { text: "automode: template store unavailable" };
+      const parts = tail.split(/\s+/).filter(Boolean);
+      const src = parts[0];
+      const dst = parts[1];
+      if (!src) {
+        return {
+          text: [
+            "Usage: /automode template-clone <builtin-name> [new-name]",
+            "If <new-name> is omitted, clones as the same name (user copy shadows built-in).",
+          ].join("\n"),
+        };
+      }
+      const r = templates.cloneBuiltin(src, dst);
+      return {
+        text: r.ok
+          ? `✅ cloned '${src}' → user template '${r.name}' at ${r.path}\nCustomise with /automode template-set ${r.name} <field> <value>`
+          : `✗ ${r.error}`,
+      };
+    }
     case "ledger":
     case "cost": {
       const window = (tail.split(/\s+/)[0] ?? "all").toLowerCase();
@@ -630,9 +700,56 @@ async function handleTemplate(
         ].join("\n"),
       };
     }
+    const rows = list.map((t) => {
+      const badge = t.builtin ? "★" : "·";
+      const name = t.name.padEnd(16);
+      const caps: string[] = [];
+      if (t.autonomy) caps.push(`auto=${t.autonomy}`);
+      if (typeof t.maxTurns === "number") caps.push(`turns=${t.maxTurns}`);
+      if (typeof t.maxCostUsd === "number") caps.push(`$${t.maxCostUsd}`);
+      const tail = caps.length ? `  [${caps.join(" ")}]` : "";
+      return `  ${badge} ${name} — ${t.description ?? ""}${tail}`;
+    });
     return {
-      text: ["automode templates:", ...list.map((t) => `  ${t.name.padEnd(24)} — ${t.description ?? ""}`)].join("\n"),
+      text: [
+        "automode templates  (★ built-in, · user-authored)",
+        "",
+        ...rows,
+        "",
+        "Run one with:",
+        "  /automode template <name> <arg>",
+        "Example:",
+        "  /automode template fix-tests src/utils/",
+        "",
+        "Preview a template without running:",
+        "  /automode template <name>",
+        "",
+        `User templates live in: ${templates.dir}/<name>.yaml`,
+      ].join("\n"),
     };
+  }
+  // Preview-only: `/automode template <name>` with no arg dumps the template
+  // so the user can inspect it before running. Running still requires an arg
+  // for templates whose goalTemplate uses {{arg}}.
+  if (parts.length === 1) {
+    const tpl = templates.load(parts[0]!);
+    if (!tpl) return { text: `no template '${parts[0]}'. Use /automode templates to list.` };
+    const needsArg = /\{\{\s*args?\s*\}\}/.test(tpl.goalTemplate ?? "");
+    const lines = [
+      `${tpl.builtin ? "★" : "·"} template '${tpl.name}'`,
+      tpl.description ? `description: ${tpl.description}` : "",
+      tpl.goalTemplate ? `goalTemplate: ${tpl.goalTemplate}` : "",
+      tpl.goal ? `goal: ${tpl.goal}` : "",
+      tpl.agent ? `agent: ${tpl.agent}` : "",
+      tpl.autonomy ? `autonomy: ${tpl.autonomy}` : "",
+      typeof tpl.maxTurns === "number" ? `maxTurns: ${tpl.maxTurns}` : "",
+      typeof tpl.maxCostUsd === "number" ? `maxCostUsd: $${tpl.maxCostUsd}` : "",
+      "",
+      needsArg
+        ? `Run: /automode template ${tpl.name} <arg>`
+        : `Run: /automode template ${tpl.name}`,
+    ].filter(Boolean);
+    return { text: lines.join("\n") };
   }
   const name = parts[0]!;
   const args = parts.slice(1).join(" ");
@@ -779,8 +896,13 @@ export function helpText(): string {
     "  /automode ledger [day|week|month|all]  Cost + status report",
     "",
     "Templates, chaining, shadow:",
-    "  /automode templates                    List saved templates",
-    "  /automode template <name> [args]       Start from a template",
+    "  /automode templates                    List saved templates (★ built-in)",
+    "  /automode template <name>              Preview template (no run)",
+    "  /automode template <name> <arg>        Start from a template",
+    "  /automode template-new <name>          Create empty user template",
+    "  /automode template-set <n> <f> <v>     Edit a field (desc, goalTemplate, …)",
+    "  /automode template-clone <builtin>     Copy a built-in for customisation",
+    "  /automode template-delete <name>       Remove a user template",
     "  /automode shadow -a X -a Y <goal>      Run same goal on ≥2 agents in parallel",
     "  /automode budget <USD>                 Sticky cost cap (0 = disabled)",
     "",

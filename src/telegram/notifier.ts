@@ -1,13 +1,12 @@
 import type { AutomodeConfig, TaskState, VerbosityLevel } from "../types.js";
 import { makeThrottler, withTimeout, type Throttler } from "./throttle.js";
+import { loadTelegramSdk, type TelegramSdk } from "./sdk.js";
 
 const SEND_TIMEOUT_MS = 10_000;
 const VERBOSE_RATE_PER_SEC = 2;  // max 2 verbose msgs/sec per task
 const VERBOSE_BURST = 6;
 
 type AnyLogger = { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
-
-type SendResult = { messageId?: number; chatId?: string };
 
 export type TelegramButton = {
   text: string;
@@ -19,20 +18,7 @@ export type TelegramSendOpts = {
   accountId?: string;
   buttons?: TelegramButton[][];
   replyToMessageId?: number;
-};
-
-type MaybeTelegramApi = {
-  sendMessageTelegram?: (
-    chatId: string,
-    text: string,
-    opts?: TelegramSendOpts,
-  ) => Promise<SendResult>;
-  editMessageTelegram?: (
-    chatId: string,
-    messageId: number,
-    text: string,
-    opts?: TelegramSendOpts,
-  ) => Promise<SendResult>;
+  textMode?: "markdown" | "html";
 };
 
 function formatDuration(ms: number): string {
@@ -43,11 +29,6 @@ function formatDuration(ms: number): string {
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
-}
-
-function resolveTelegramApi(runtime: unknown): MaybeTelegramApi | null {
-  const r = runtime as { channel?: { telegram?: MaybeTelegramApi } } | undefined;
-  return r?.channel?.telegram ?? null;
 }
 
 /**
@@ -72,8 +53,10 @@ export function normalizeTaskChatId(
 
 export class TelegramNotifier {
   private readonly verboseThrottlers = new Map<string, Throttler>();
+  private sdkPromise: Promise<TelegramSdk | null> | null = null;
+
   constructor(
-    private readonly runtime: unknown,
+    _runtime: unknown, // kept for backwards-compat with existing call sites
     private readonly cfg: AutomodeConfig,
     private readonly logger: AnyLogger,
   ) {}
@@ -87,14 +70,16 @@ export class TelegramNotifier {
     return t;
   }
 
-  private get api(): MaybeTelegramApi | null {
-    return resolveTelegramApi(this.runtime);
+  /** Lazy-load the telegram SDK once and reuse. */
+  private sdk(): Promise<TelegramSdk | null> {
+    if (!this.sdkPromise) this.sdkPromise = loadTelegramSdk(this.logger);
+    return this.sdkPromise;
   }
 
   enabled(task?: TaskState): boolean {
     if (!this.cfg.telegram.enabled) return false;
     const chat = normalizeTaskChatId(task?.telegram?.chatId, this.cfg.telegram.chatId);
-    return !!chat && !!this.api?.sendMessageTelegram;
+    return !!chat;
   }
 
   private resolveChat(task: TaskState): { chatId: string; accountId: string } | null {
@@ -123,10 +108,14 @@ export class TelegramNotifier {
       `goal: ${task.goal}`,
     ].join("\n");
     try {
-      const res = await this.api!.sendMessageTelegram!(ch.chatId, text, {
-        accountId: ch.accountId,
-      });
-      return res.messageId;
+      const sdk = await this.sdk();
+      if (!sdk) return undefined;
+      const res = await withTimeout(
+        sdk.sendMessage(ch.chatId, text, { accountId: ch.accountId }),
+        SEND_TIMEOUT_MS,
+        "telegram send",
+      );
+      return typeof res?.messageId === "string" ? Number(res.messageId) : undefined;
     } catch (e) {
       this.logger.warn(`[automode] telegram start notify failed: ${(e as Error).message}`);
       return undefined;
@@ -151,32 +140,45 @@ export class TelegramNotifier {
       typeof task.totalCostUsd === "number"
         ? `$${task.totalCostUsd.toFixed(4)}`
         : "(n/a)";
+    const tailing = !!task.telegram?.tailActive;
     const text = [
-      `🔄 automode \`${task.id}\` · turn ${turn}/${task.caps.maxTurns}`,
+      `${tailing ? "📡" : "🔄"} automode \`${task.id}\` · turn ${turn}/${task.caps.maxTurns}`,
       `${task.config.defaultAgent} @ ${task.config.backend} · cost ${costLine} · elapsed ${formatDuration(elapsedMs)} · ETA ~${formatDuration(etaMs)}`,
       ``,
       summary.slice(0, 1200),
     ].join("\n");
+    const buttons: TelegramButton[][] | undefined = tailing
+      ? [
+          [
+            { text: "🛑  Stop tailing", callback_data: `automode:menu:untail:${task.id}`, style: "danger" },
+            { text: "🔍  Details", callback_data: `automode:menu:nav:task:${task.id}` },
+          ],
+        ]
+      : undefined;
     try {
-      if (task.telegram?.progressMessageId && this.api?.editMessageTelegram) {
-        await withTimeout(
-          this.api.editMessageTelegram(
-            ch.chatId,
-            task.telegram.progressMessageId,
-            text,
-            { accountId: ch.accountId },
-          ),
-          SEND_TIMEOUT_MS,
-          "telegram edit",
-        );
-        return task.telegram.progressMessageId;
+      const sdk = await this.sdk();
+      if (!sdk) return undefined;
+      if (task.telegram?.progressMessageId) {
+        try {
+          await withTimeout(
+            sdk.editMessage(ch.chatId, task.telegram.progressMessageId, text, {
+              accountId: ch.accountId,
+              buttons,
+            }),
+            SEND_TIMEOUT_MS,
+            "telegram edit",
+          );
+          return task.telegram.progressMessageId;
+        } catch {
+          // Fall through to a fresh send if the edit fails (message gone, etc.)
+        }
       }
       const res = await withTimeout(
-        this.api!.sendMessageTelegram!(ch.chatId, text, { accountId: ch.accountId }),
+        sdk.sendMessage(ch.chatId, text, { accountId: ch.accountId, buttons }),
         SEND_TIMEOUT_MS,
         "telegram send",
       );
-      return res.messageId;
+      return typeof res?.messageId === "string" ? Number(res.messageId) : undefined;
     } catch (e) {
       this.logger.warn(`[automode] telegram progress notify failed: ${(e as Error).message}`);
       return undefined;
@@ -193,11 +195,14 @@ export class TelegramNotifier {
     if (!ch) return undefined;
     const text = [`⚠️ automode needs approval`, `task: \`${task.id}\``, ``, reason].join("\n");
     try {
-      const res = await this.api!.sendMessageTelegram!(ch.chatId, text, {
-        accountId: ch.accountId,
-        buttons,
-      });
-      return res.messageId;
+      const sdk = await this.sdk();
+      if (!sdk) return undefined;
+      const res = await withTimeout(
+        sdk.sendMessage(ch.chatId, text, { accountId: ch.accountId, buttons }),
+        SEND_TIMEOUT_MS,
+        "telegram escalation send",
+      );
+      return typeof res?.messageId === "string" ? Number(res.messageId) : undefined;
     } catch (e) {
       this.logger.warn(`[automode] telegram escalation notify failed: ${(e as Error).message}`);
       return undefined;
@@ -229,8 +234,10 @@ export class TelegramNotifier {
     const prefix = dropped > 0 ? `(+${dropped} dropped) ` : "";
     const text = `· \`${task.id}\` ${prefix}${line}`.slice(0, 3500);
     try {
+      const sdk = await this.sdk();
+      if (!sdk) return;
       await withTimeout(
-        this.api!.sendMessageTelegram!(ch.chatId, text, { accountId: ch.accountId }),
+        sdk.sendMessage(ch.chatId, text, { accountId: ch.accountId }),
         SEND_TIMEOUT_MS,
         "telegram verbose send",
       );
@@ -262,11 +269,20 @@ export class TelegramNotifier {
       summary.slice(0, 1500),
     ].join("\n");
     try {
-      await this.api!.sendMessageTelegram!(ch.chatId, text, {
-        accountId: ch.accountId,
-      });
+      const sdk = await this.sdk();
+      if (!sdk) return;
+      await withTimeout(
+        sdk.sendMessage(ch.chatId, text, { accountId: ch.accountId }),
+        SEND_TIMEOUT_MS,
+        "telegram done send",
+      );
     } catch (e) {
       this.logger.warn(`[automode] telegram done notify failed: ${(e as Error).message}`);
     }
+  }
+
+  /** Exposed for the menu sender which lives in index.ts. */
+  async getSdk(): Promise<TelegramSdk | null> {
+    return this.sdk();
   }
 }

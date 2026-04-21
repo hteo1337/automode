@@ -77,6 +77,7 @@ export class Scheduler {
       id,
       version: 1,
       goal: opts.goal.trim(),
+      title: heuristicTitle(opts.goal),
       owner: opts.owner,
       mode,
       status: "pending",
@@ -204,6 +205,31 @@ export class Scheduler {
       await run.runningPromise.catch(() => undefined);
     }
     state.status = "paused";
+    this.store.save(state);
+    return { ok: true };
+  }
+
+  /**
+   * Toggle whether `notifyProgress` should include a Stop-tailing button and
+   * tail-icon for this task. Used by the Telegram Tasks menu.
+   */
+  setTail(id: string, active: boolean): { ok: boolean; error?: string } {
+    const state = this.store.load(id);
+    if (!state) return { ok: false, error: `no task ${id}` };
+    state.telegram = { ...(state.telegram ?? {}), tailActive: active };
+    this.store.save(state);
+    return { ok: true };
+  }
+
+  /**
+   * Rebind the progress message that `notifyProgress` edits. Used when the
+   * user taps Tail on a specific Telegram message — that message becomes
+   * the live dashboard.
+   */
+  setProgressMessage(id: string, chatId: string, messageId: number): { ok: boolean; error?: string } {
+    const state = this.store.load(id);
+    if (!state) return { ok: false, error: `no task ${id}` };
+    state.telegram = { ...(state.telegram ?? {}), chatId, progressMessageId: messageId };
     this.store.save(state);
     return { ok: true };
   }
@@ -342,6 +368,12 @@ export class Scheduler {
           );
         } catch (e) {
           state.planner = plannerFallback(state, 0.3, `planner failed: ${(e as Error).message}`);
+        }
+        // Upgrade the heuristic title with the planner's cleaner version
+        // when one was returned. Heuristic stays if the planner was silent.
+        if (state.planner.title) {
+          const t = state.planner.title.trim().replace(/\s+/g, " ");
+          if (t) state.title = t.length > 60 ? t.slice(0, 57) + "…" : t;
         }
         const policy = policyFor(state.config.autonomy);
         const belowThreshold =
@@ -693,4 +725,26 @@ function newId(): string {
   const ts = Date.now().toString(36);
   const rnd = Math.random().toString(36).slice(2, 8);
   return `t${ts}-${rnd}`;
+}
+
+/**
+ * Derive a short, human-readable title from the raw goal text. Used as a
+ * placeholder title the moment a task is created, before the planner
+ * (turn 0) has a chance to return a cleaner one.
+ *
+ * Rules:
+ *   - First sentence (terminated by `.`, `!`, `?`, or newline).
+ *   - Strip leading imperatives like "please ", "can you ", "I want ".
+ *   - Collapse whitespace; clip to 60 chars with an ellipsis.
+ */
+export function heuristicTitle(goal: string): string {
+  const raw = String(goal ?? "").trim();
+  if (!raw) return "(untitled)";
+  const firstSentence = raw.split(/[.!?\n]/)[0] ?? raw;
+  const cleaned = firstSentence
+    .replace(/^\s*(please|can you|could you|i want to|i'd like to|i would like to|help me|let's)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const capped = cleaned.length > 60 ? cleaned.slice(0, 57) + "…" : cleaned;
+  return capped || raw.slice(0, 60);
 }

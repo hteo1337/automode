@@ -7,6 +7,7 @@ type AnyLogger = { info: (msg: string) => void; warn: (msg: string) => void; err
 const PLANNER_SYSTEM = `You are the automode planner. Analyse the user's goal and return STRICT JSON with this shape:
 
 {
+  "title": string,               // 3-6 word human-readable title, Title Case
   "parallel": boolean,
   "confidence": number,          // 0..1 — how confident you are in this plan
   "subtasks": [
@@ -17,6 +18,7 @@ const PLANNER_SYSTEM = `You are the automode planner. Analyse the user's goal an
 
 Rules:
 - Return JSON ONLY, no prose, no code fences.
+- "title" must be 3-6 words summarising the goal; use Title Case; no trailing punctuation.
 - If the goal is a single cohesive task, return "parallel": false and ONE subtask whose id is "main".
 - If the goal naturally splits (independent areas of a codebase, independent channels, etc.), return "parallel": true with up to 3 subtasks.
 - "agent" should be a short role name such as "frontend", "backend", "test", "docs", "research", or "general".
@@ -78,11 +80,14 @@ export async function plan(
       : [];
     if (subtasks.length === 0) return fallback(task, 0.4, "planner produced no subtasks");
     const confidence = clampNumber(parsed.confidence, 0, 1, 0.5);
+    const titleRaw = typeof parsed.title === "string" ? parsed.title.trim() : "";
+    const title = titleRaw ? titleRaw.replace(/\s+/g, " ").slice(0, 60) : undefined;
     return {
       parallel: Boolean(parsed.parallel) && subtasks.length > 1,
       confidence,
       subtasks,
       rationale: String(parsed.rationale ?? ""),
+      title,
     };
   } catch (e) {
     logger.warn(`[automode] planner JSON parse failed: ${(e as Error).message}`);

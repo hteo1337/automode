@@ -1,5 +1,6 @@
 import type { AutomodeConfig, TaskState, VerbosityLevel } from "../types.js";
 import { TelegramNotifier, type TelegramButton } from "../telegram/notifier.js";
+import type { TelegramSdk } from "../telegram/sdk.js";
 
 type AnyLogger = { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 
@@ -104,5 +105,9 @@ export class MultiChannelNotifier {
 
   disposeTask(taskId: string): void {
     this.telegram.disposeTask(taskId);
+  }
+
+  getSdk(): Promise<TelegramSdk | null> {
+    return this.telegram.getSdk();
   }
 }

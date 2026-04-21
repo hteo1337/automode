@@ -4,6 +4,107 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-04-21
+
+### Fixed — Telegram menu actually works
+- **Telegram SDK path**: 0.5.0 looked up `api.runtime.channel.telegram.sendMessageTelegram`
+  which doesn't exist on the stock homebrew install; every notification
+  (start / progress / done / escalation / verbose / menu) was a silent no-op.
+  New `src/telegram/sdk.ts` multi-strategy loader tries bare-specifier imports
+  first, then file-URL imports `dist/extensions/telegram/runtime-api.js` from
+  every discovered openclaw install root. Falls back to a logged warning with
+  every attempt listed if no SDK can be found.
+- **Menu callback interception**: button taps arrive wrapped in OpenClaw's
+  "Conversation info (untrusted metadata):…" envelope rather than as clean
+  `content`. The `message_received` + `before_agent_start` hooks now regex
+  `automode:menu:[A-Za-z0-9:_\\-]+` anywhere in the prompt, handle the action
+  in `message_received` (sends the UI), and return a `·` systemPrompt ack in
+  `before_agent_start` so the LLM doesn't hallucinate callback_data explanations.
+- **chatId extraction** from hook context: OpenClaw doesn't surface `senderId`
+  on hooks; the telegram target lives inside `sessionKey` as
+  `agent:<id>:telegram:(direct|group):<chatId>`. New `extractHookChatId()`
+  regex-matches that format with fallbacks for nested `from.id` and bare
+  numeric chat ids.
+- **Duplicate submenu** on tap: both hooks were sending the same submenu.
+  `before_agent_start` now only produces the tiny `·` ack; `message_received`
+  is the sole UI sender.
+
+### Added — Tasks page with pagination, filters, live tail
+- **📋 Tasks** button now opens a paginated task list (8 per page) with
+  filter tabs: `Running N`, `All N`, `Done N`, `Failed N`. Empty tabs hide
+  themselves (Running always shown). Active tab marked with `•`.
+- **Task row** shows color-coded status glyph + short id + title + turn
+  progress (live) or elapsed time (terminal) + cost: `🟢 tabc1234 — Fix Login
+  Bug · t3/50 · $0.12`.
+- **🔍 Task detail page**: tap a row → see goal, agent, autonomy, mode,
+  status-glyph + turn/cost/elapsed, and action buttons that adapt to state:
+  - Live: `[📡 Tail | 🔄 Refresh]` + `[⏸ Pause | ⏹ Stop]`
+  - Paused: `[▶️ Resume | ⏹ Stop]`
+  - Terminal: just `[‹ Back to tasks]`
+- **📡 Tail** repurposes the task's `progressMessageId` to the current
+  Telegram message, so subsequent turn-end progress updates edit *this*
+  message live, with a `🛑 Stop tailing` button inline. No extra streaming
+  infrastructure — reuses the existing progress edit path.
+- **Pagination callbacks**: `automode:menu:nav:tasks:<filter>:<page>` with
+  `‹ Prev | M/N | Next ›` navigation. Page counter is a `noop` callback so
+  tapping it doesn't trigger a Telegram "nothing happened" toast.
+- **Status glyphs** are now distinct per state: 🟢 running, 🔵 pending,
+  🟡 waiting, ⏸️ paused, ⚠️ escalating, ✅ done, 🟠 capped, ❌ failed, ⛔ stopped.
+
+### Added — Task titles
+- `TaskState.title` is populated on creation from a heuristic clip of the
+  goal (`heuristicTitle()`: first sentence, strips polite prefixes, collapses
+  whitespace, clips to 60 chars).
+- Planner turn 0 overwrites the heuristic with a cleaner 3–6 word Title
+  Case version via new `title` field in the planner JSON output.
+- Titles surface in the Tasks list, on the task detail page header, and
+  are Markdown-escaped so user-controlled text can't break message parse.
+- Older tasks without titles fall back to a clipped `goal`; no migration.
+
+### Added — Menu buttons execute inline instead of hints
+- Tapping **🧭 Doctor / 💡 Help / 🛠 Defaults / 🧩 Templates / 📖 Ledger**
+  now runs the corresponding `/automode <subcmd>` via `runAutomodeCommand()`
+  and streams the result back into the chat in a monospace fence. Previously
+  these only nudged the user to type the slash command themselves.
+- **New task** remains a hint (Telegram inline keyboards can't take text
+  input, so the goal must be typed explicitly).
+- Settlers set extended in `before_agent_start` so the LLM emits a `·` ack
+  rather than hallucinating a response for these actions.
+
+### Added — Built-in templates + full CRUD
+- **14 built-in templates** ship with the plugin, covering dev + ops:
+  `fix-tests`, `add-tests`, `review`, `refactor`, `bump-deps`, `debug`,
+  `doc-sync`, `deploy-check`, `feature`, `bug-fix`, `api-endpoint`,
+  `migrate`, `perf`, `spike`. Each has autonomy + maxTurns + maxCostUsd
+  tuned to its risk profile. `/automode templates` marks them with ★;
+  user-authored files (marked ·) override built-ins on name collision.
+- `/automode template <name>` with no arg now **previews** the template
+  (no run). Running still needs the `<arg>`.
+- **New mutation commands**:
+  - `/automode template-new <name>` — create empty user YAML
+  - `/automode template-set <name> <field> <value>` — set one field
+    (description, goal, goalTemplate, agent, backend, autonomy, verbosity,
+    maxTurns, maxDurationSec, maxCostUsd, onDone, onFail)
+  - `/automode template-clone <builtin> [new-name]` — copy a built-in for
+    customisation (omit `new-name` to shadow)
+  - `/automode template-delete <name>` — remove user YAML
+- Built-ins are immutable: `template-set` / `template-delete` on a built-in
+  name returns a clear error pointing at `template-clone`.
+- Field values are validated + coerced (bad autonomy level, negative
+  `maxTurns`, non-numeric `maxCostUsd` → clear error). Name validation:
+  `^[a-z0-9][a-z0-9_-]{0,39}$`.
+- **Telegram Templates menu** (🧩 Templates): lists user + built-in
+  templates with `[➕ New] [✏️ Edit] [🗑 Delete] [📋 Clone]` buttons. Each
+  button sends a hint explaining the slash command to type (buttons
+  can't take text input).
+
+### Polish
+- DIAG hook logging is now gated behind `AUTOMODE_DEBUG=1` env (was
+  always-on noise in 0.5.0).
+- Tab labels in the Tasks filter row truncated on mobile Telegram at ~30
+  chars; switched to two rows of two tabs with full labels
+  (`• 🟢 Running 0` / `🗂 All 8` / `✅ Done 8` / `❌ Failed 1`).
+
 ## [0.5.0] — 2026-04-20
 
 ### Added — Telegram inline-keyboard menu

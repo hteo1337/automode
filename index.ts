@@ -163,7 +163,7 @@ export default {
           // inline-keyboard menu. Non-Telegram channels fall through to the
           // regular command flow (which returns help text for empty args).
           if ((raw === "" || raw.toLowerCase() === "menu") && ctx.channel === "telegram") {
-            const sent = await sendMenuToTelegram(api.runtime, cfg, ctx, "root", scheduler, prefs, log);
+            const sent = await sendMenuToTelegram(notifier, cfg, ctx, "root", scheduler, prefs, log);
             return { text: sent ? "" : "automode menu unavailable on this chat" };
           }
           return await runAutomodeCommand(scheduler, ctx, cfg, log, prefs, templates);
@@ -295,19 +295,284 @@ export default {
       { priority: 10 },
     );
 
-    // 4.5) Default-to-automode hook.
-    //      Intercepts before_agent_start when the chat (or global config) has
-    //      routing enabled; spawns an automode task and nudges the host agent
-    //      to produce a minimal acknowledgement instead of a full response.
+    // 4.4) DIAG — gated behind AUTOMODE_DEBUG env. Mirrors every hook so we can
+    // see what OpenClaw hands us when a Telegram button is tapped.
+    const DEBUG = process.env.AUTOMODE_DEBUG === "1" || process.env.AUTOMODE_DEBUG === "true";
+    const diag = DEBUG
+      ? (tag: string, event: unknown, hctx: unknown) => {
+          try {
+            const e = event as Record<string, unknown>;
+            const c = hctx as Record<string, unknown>;
+            const promptStr = typeof e?.prompt === "string" ? (e.prompt as string) : undefined;
+            const contentStr = typeof e?.content === "string" ? (e.content as string) : undefined;
+            const textStr = typeof e?.text === "string" ? (e.text as string) : undefined;
+            const eventKeys = Object.keys(e ?? {}).join(",");
+            const hasMenuCb =
+              (promptStr && /automode:menu:/i.test(promptStr)) ||
+              (contentStr && /automode:menu:/i.test(contentStr)) ||
+              (textStr && /automode:menu:/i.test(textStr));
+            const ctxDump = Object.entries(c ?? {})
+              .filter(([, v]) => typeof v === "string")
+              .map(([k, v]) => `${k}=${String(v).slice(0, 120)}`)
+              .join(" | ");
+            log.info(
+              `[automode:DIAG] ${tag}${hasMenuCb ? " [MENU-CB]" : ""} eventKeys=[${eventKeys}] ctx{${ctxDump}} ` +
+                (promptStr !== undefined ? `prompt="${promptStr.slice(0, 300)}" ` : "") +
+                (contentStr !== undefined ? `content="${contentStr.slice(0, 300)}" ` : "") +
+                (textStr !== undefined ? `text="${textStr.slice(0, 200)}" ` : ""),
+            );
+          } catch {
+            // ignore
+          }
+        }
+      : () => undefined;
+    // message_received sees the clean callback content BEFORE it's wrapped
+    // in an agent envelope. Can't suppress the agent from here (void return),
+    // but we CAN send the submenu / mutate prefs proactively. The
+    // before_agent_start branch below still fires to steer the agent's
+    // own one-liner reply.
+    api.on?.("message_received", async (ev, c) => {
+      diag("message_received", ev, c);
+      try {
+        const e = ev as { content?: string };
+        const content = (e.content ?? "").trim();
+        if (!content.startsWith("automode:menu:")) return;
+        const payload = parseMenuData(content);
+        if (!payload) return;
+        const sdk = await notifier.getSdk();
+        const chatId = extractHookChatId(c, cfg.telegram.chatId);
+        if (!sdk || !chatId) {
+          log.warn(
+            `[automode] message_received menu-cb: cannot reply (sdk=${!!sdk}, chatId=${chatId ?? "null"})`,
+          );
+          return;
+        }
+        if (payload.kind === "nav") {
+          const menu = buildMenu(
+            payload.page as MenuPage,
+            scheduler,
+            cfg,
+            prefs,
+            payload.arg,
+            templates,
+          );
+          await sdk.sendMessage(chatId, menu.text, {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+            buttons: menu.buttons,
+          }).catch((err) => log.warn(`[automode] submenu send failed: ${(err as Error).message}`));
+          return;
+        }
+        // Leaf action: prefs setters OR task-control actions.
+        const { action, arg } = payload;
+        if (action === "noop") return; // e.g. page-counter button
+        if (action === "tplhint") {
+          const hint = templateHint(arg);
+          await sdk.sendMessage(chatId, hint, {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+          }).catch((err) => log.warn(`[automode] tplhint send failed: ${(err as Error).message}`));
+          return;
+        }
+        let note = "";
+        let afterPage: MenuPage | "task" = "root";
+        let afterPageArg: string | undefined;
+        if (action === "autonomy" && arg) {
+          const level = parseAutonomyLevel(arg);
+          if (level) {
+            prefs.set({ autonomy: level });
+            note = `✅ autonomy → ${level}`;
+          }
+        } else if (action === "budget" && arg !== undefined) {
+          const n = Number(arg);
+          if (Number.isFinite(n) && n >= 0) {
+            prefs.set({ budgetUsd: n });
+            note = n > 0 ? `✅ budget → $${n.toFixed(2)}` : "✅ budget → disabled";
+          }
+        } else if (action === "verbose" && arg !== undefined) {
+          const n = Number(arg);
+          if (Number.isFinite(n) && n >= 0 && n <= 3) {
+            prefs.set({ verbosity: Math.floor(n) as 0 | 1 | 2 | 3 });
+            note = `✅ verbosity → ${Math.floor(n)}`;
+          }
+        } else if (action === "inspect" && arg) {
+          note = "";
+          afterPage = "task";
+          afterPageArg = arg;
+        } else if (action === "tail" && arg) {
+          // Claim the progress message for this task: future turn-end progress
+          // updates will edit messages in this chat. The current inspect
+          // message becomes the dashboard once we rebuild it in task mode.
+          scheduler.setTail(arg, true);
+          note = "📡 Tailing — live updates will edit this thread.";
+          afterPage = "task";
+          afterPageArg = arg;
+        } else if (action === "untail" && arg) {
+          scheduler.setTail(arg, false);
+          note = "🛑 Stopped tailing.";
+          afterPage = "task";
+          afterPageArg = arg;
+        } else if (action === "taskpause" && arg) {
+          const r = await scheduler.pauseTask(arg);
+          note = r.ok ? "⏸ Paused." : `⚠️ ${r.error ?? "pause failed"}`;
+          afterPage = "task";
+          afterPageArg = arg;
+        } else if (action === "taskresume" && arg) {
+          const r = await scheduler.resumeTask(arg);
+          note = r.ok ? "▶️ Resumed." : `⚠️ ${r.error ?? "resume failed"}`;
+          afterPage = "task";
+          afterPageArg = arg;
+        } else if (action === "taskstop" && arg) {
+          const r = await scheduler.stopTask(arg, "user (menu)");
+          note = r.ok ? "⏹ Stopped." : `⚠️ ${r.error ?? "stop failed"}`;
+          afterPage = "tasks";
+        } else if (
+          action === "doctor" ||
+          action === "help" ||
+          action === "defaults" ||
+          action === "templates" ||
+          action === "ledger" ||
+          action === "status"
+        ) {
+          // Execute the real slash-command inline and stream the result
+          // back to this chat. No prefs/state change -> no follow-up menu.
+          try {
+            const commandArgs = action === "status" ? "status" : action;
+            const result = await runAutomodeCommand(
+              scheduler,
+              { args: commandArgs, channel: "telegram", senderId: chatId },
+              cfg,
+              log,
+              prefs,
+              templates,
+            );
+            const body = result?.text ?? `(no output for ${action})`;
+            // Telegram message limit is 4096; trim to stay well clear and
+            // wrap in a code fence so leading `>` or `*` doesn't break parse.
+            const clipped = body.length > 3500 ? body.slice(0, 3497) + "…" : body;
+            await sdk.sendMessage(chatId, "```\n" + clipped + "\n```", {
+              accountId: cfg.telegram.accountId,
+              textMode: "markdown",
+            }).catch((err) => log.warn(`[automode] ${action} send failed: ${(err as Error).message}`));
+          } catch (err) {
+            log.warn(`[automode] ${action} inline exec failed: ${(err as Error).message}`);
+            await sdk.sendMessage(chatId, `⚠️ ${action} failed: ${(err as Error).message}`, {
+              accountId: cfg.telegram.accountId,
+            }).catch(() => undefined);
+          }
+          return;
+        }
+        if (note) {
+          const menu = buildMenu(afterPage as MenuPage, scheduler, cfg, prefs, afterPageArg);
+          await sdk.sendMessage(chatId, `${note}\n\n${menu.text}`, {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+            buttons: menu.buttons,
+          }).catch((err) => log.warn(`[automode] post-action re-render failed: ${(err as Error).message}`));
+        } else if (action === "inspect" && arg) {
+          const menu = buildMenu("task", scheduler, cfg, prefs, arg);
+          await sdk.sendMessage(chatId, menu.text, {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+            buttons: menu.buttons,
+          }).catch((err) => log.warn(`[automode] inspect send failed: ${(err as Error).message}`));
+        }
+      } catch (err) {
+        log.warn(`[automode] message_received menu-cb error: ${(err as Error).message}`);
+      }
+    });
+    api.on?.("before_prompt_build", (ev, c) => {
+      diag("before_prompt_build", ev, c);
+      return undefined;
+    });
+
+    // 4.5) before_agent_start interceptor. Two responsibilities:
+    //   (a) Menu callback_data (automode:menu:…): OpenClaw's Telegram plugin
+    //       dispatches button taps into the agent pipeline as inbound text.
+    //       We recognise our namespace, handle it (mutate prefs, send a
+    //       submenu or confirmation), and return a systemPrompt that makes
+    //       the agent send a 1-line ACK so we don't burn tokens.
+    //   (b) Default-to-automode routing: if enabled for this chat and the
+    //       message passes the heuristic gate, spawn a task and ACK.
     api.on?.("before_agent_start", async (event, hctx) => {
+      diag("before_agent_start", event, hctx);
       try {
         const hookEvent = event as { prompt?: string };
         const ctxObj = hctx as { channel?: string; senderId?: string; chatId?: string };
-        const chatId = ctxObj.chatId ?? (ctxObj.channel === "telegram" && ctxObj.senderId ? `telegram:${ctxObj.senderId}` : undefined);
-        const decision = shouldRouteToAutomode(hookEvent.prompt ?? "", chatId, cfg, prefs);
+        const chatId = extractHookChatId(hctx, cfg.telegram.chatId);
+        const prompt = (hookEvent.prompt ?? "").trim();
+
+        // (a) Menu callback interception.
+        //
+        //     The actual UI work (sending submenus, mutating prefs, re-rendering
+        //     the root menu) is done in the `message_received` hook above
+        //     because it sees the clean callback_data BEFORE the inbound
+        //     envelope is applied. This branch only produces a systemPrompt
+        //     so the agent's own reply stays minimal — for nav/setter, a
+        //     single bullet to confirm; for leaf info actions, the hint.
+        //
+        //     The raw callback is wrapped by OpenClaw's inbound envelope
+        //     ("Conversation info (untrusted metadata):\n...\nautomode:menu:X\n...").
+        //     Match the token anywhere.
+        const menuMatch = prompt.match(/automode:menu:[A-Za-z0-9:_\-]+/);
+        if (menuMatch) {
+          const payload = parseMenuData(menuMatch[0]);
+          if (payload) {
+            log.info(`[automode] menu callback (agent ack only): ${menuMatch[0]}`);
+            let ack = "·";
+            if (payload.kind === "action") {
+              const hints: Record<string, string> = {
+                status: "Use /automode status for the live list.",
+                help: "Use /automode help for the full command list.",
+                doctor: "Use /automode doctor for SDK + agent diagnostics.",
+                defaults: "Use /automode defaults for sticky prefs.",
+                templates: "Use /automode templates (list) or /automode template <name>.",
+                ledger: "Use /automode ledger [day|week|month|all].",
+                newtask: "Send /automode <goal> to start. Add -y for yolo or --dry-run to simulate.",
+              };
+              // For setter / task-control actions the message_received
+              // handler already sent the UI; a tiny bullet here keeps the
+              // thread clean and stops the LLM from hallucinating callback_data.
+              const settlers = new Set([
+                "autonomy",
+                "budget",
+                "verbose",
+                "inspect",
+                "tail",
+                "untail",
+                "taskpause",
+                "taskresume",
+                "taskstop",
+                "noop",
+                // Doctor/Help/Defaults/Templates/Ledger/Status are executed
+                // inline in message_received; the agent should just emit a
+                // tiny ack so the LLM doesn't hallucinate a hint reply.
+                "doctor",
+                "help",
+                "defaults",
+                "templates",
+                "ledger",
+                "status",
+                "tplhint",
+              ]);
+              if (settlers.has(payload.action)) {
+                ack = "·";
+              } else if (hints[payload.action]) {
+                ack = hints[payload.action]!;
+              }
+            }
+            return {
+              systemPrompt:
+                `Reply with exactly one line and nothing else:\n${ack}\nDo not elaborate. Do not explain the callback_data format.`,
+            };
+          }
+        }
+
+        // (b) Default-to-automode routing.
+        const decision = shouldRouteToAutomode(prompt, chatId, cfg, prefs);
         if (!decision.route) return undefined;
         const state = await scheduler.startTask({
-          goal: hookEvent.prompt ?? "",
+          goal: prompt,
           mode: "hybrid",
           chatId,
           owner: ctxObj.senderId || ctxObj.channel
@@ -361,10 +626,11 @@ export default {
               scheduler,
               cfg,
               prefs,
-              api.runtime,
+              notifier,
               fromChatId,
               fromMessageId,
               log,
+              templates,
             );
             w.statusCode = 200;
             w.setHeader("Content-Type", "application/json");
@@ -412,39 +678,69 @@ export default {
   },
 };
 
-type TgApi = {
-  sendMessageTelegram?: (chatId: string, text: string, opts?: unknown) => Promise<{ messageId?: number } | undefined>;
-  editMessageTelegram?: (chatId: string, messageId: number, text: string, opts?: unknown) => Promise<unknown>;
-};
-
-function resolveTgApi(runtime: unknown): TgApi | null {
-  const r = runtime as { channel?: { telegram?: TgApi } } | undefined;
-  return r?.channel?.telegram ?? null;
-}
-
 function resolveChatId(ctx: { channel?: string; senderId?: string }, cfgChatId: string | undefined): string | undefined {
   if (ctx.channel === "telegram" && ctx.senderId) return `telegram:${ctx.senderId}`;
   if (ctx.channel && ctx.channel.includes(":")) return ctx.channel;
   return cfgChatId;
 }
 
+/**
+ * Extract a telegram chat id from the hook context. OpenClaw doesn't give us
+ * `senderId` directly — the telegram target lives inside `sessionKey`,
+ * `conversationId`, or `channelId`. Known formats:
+ *   agent:<agentId>:telegram:direct:<senderId>
+ *   agent:<agentId>:telegram:group:<chatId>[:topic:<n>]
+ *   telegram:<id>             (already namespaced)
+ *   -100…                     (bare numeric chat id)
+ */
+function extractHookChatId(hctx: unknown, cfgChatId: string | undefined): string | undefined {
+  const h = hctx as Record<string, unknown> | undefined;
+  if (!h) return cfgChatId;
+  const candidates: string[] = [];
+  for (const k of ["sessionKey", "channelId", "sessionId", "conversationId", "chatId"]) {
+    const v = h[k];
+    if (typeof v === "string" && v) candidates.push(v);
+  }
+  // Nested `from.id` / `from.userId` on message_received.
+  const fromObj = h.from as Record<string, unknown> | undefined;
+  if (fromObj) {
+    for (const k of ["id", "userId", "chatId"]) {
+      const v = fromObj[k];
+      if (typeof v === "string" && v) candidates.push(v);
+      if (typeof v === "number" && Number.isFinite(v)) candidates.push(String(v));
+    }
+  }
+  for (const raw of candidates) {
+    const m1 = raw.match(/\btelegram:(?:direct|group):(-?\d+)/);
+    if (m1) return `telegram:${m1[1]}`;
+    const m2 = raw.match(/^telegram:(-?\d+)(?::|$)/);
+    if (m2) return `telegram:${m2[1]}`;
+    // Bare numeric id (rare but possible on some ctxs)
+    if (/^-?\d{5,}$/.test(raw)) return `telegram:${raw}`;
+  }
+  return cfgChatId;
+}
+
+type MenuLog = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
+
 async function sendMenuToTelegram(
-  runtime: unknown,
+  notifier: MultiChannelNotifier,
   cfg: Parameters<typeof buildMenu>[2],
   ctx: { channel?: string; senderId?: string },
   page: MenuPage,
   scheduler: Parameters<typeof buildMenu>[1],
   prefs: Parameters<typeof buildMenu>[3],
-  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+  log: MenuLog,
 ): Promise<boolean> {
-  const tg = resolveTgApi(runtime);
-  if (!tg?.sendMessageTelegram) return false;
+  const sdk = await notifier.getSdk();
+  if (!sdk) return false;
   const chatId = resolveChatId(ctx, cfg.telegram.chatId);
   if (!chatId) return false;
   const menu = buildMenu(page, scheduler, cfg, prefs);
   try {
-    await tg.sendMessageTelegram(chatId, menu.text, {
+    await sdk.sendMessage(chatId, menu.text, {
       accountId: cfg.telegram.accountId,
+      textMode: "markdown",
       buttons: menu.buttons,
     });
     return true;
@@ -459,37 +755,70 @@ async function handleMenuCallback(
   scheduler: Parameters<typeof buildMenu>[1],
   cfg: Parameters<typeof buildMenu>[2],
   prefs: Parameters<typeof buildMenu>[3],
-  runtime: unknown,
+  notifier: MultiChannelNotifier,
   chatId: string | undefined,
   messageId: number | undefined,
-  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+  log: MenuLog,
+  templates: Parameters<typeof runAutomodeCommand>[5],
 ): Promise<{ ok: boolean; text: string }> {
   if (!payload) return { ok: false, text: "invalid menu payload" };
-  const tg = resolveTgApi(runtime);
+  const sdk = await notifier.getSdk();
   const effectiveChatId = chatId ?? cfg.telegram.chatId;
 
-  // Edit the menu message to navigate to a different page.
   if (payload.kind === "nav") {
-    if (!tg?.editMessageTelegram || !effectiveChatId || !messageId) {
-      return { ok: false, text: "cannot edit menu message (missing chatId / messageId)" };
+    if (!sdk || !effectiveChatId || !messageId) {
+      return { ok: false, text: "cannot edit menu message (missing sdk / chatId / messageId)" };
     }
-    const menu = buildMenu(payload.page as MenuPage, scheduler, cfg, prefs);
+    const menu = buildMenu(payload.page as MenuPage, scheduler, cfg, prefs, payload.arg, templates);
     try {
-      await tg.editMessageTelegram(effectiveChatId, messageId, menu.text, {
+      await sdk.editMessage(effectiveChatId, messageId, menu.text, {
         accountId: cfg.telegram.accountId,
+        textMode: "markdown",
         buttons: menu.buttons,
       });
-      return { ok: true, text: `nav → ${payload.page}` };
+      return { ok: true, text: `nav → ${payload.page}${payload.arg ? `:${payload.arg}` : ""}` };
     } catch (e) {
       log.warn(`[automode] menu nav edit failed: ${(e as Error).message}`);
       return { ok: false, text: (e as Error).message };
     }
   }
 
-  // Action leaves: mutate state / dispatch side effect, then update the
-  // menu in place so the user sees the new state.
   const { action, arg } = payload;
   switch (action) {
+    case "noop":
+      return { ok: true, text: "noop" };
+    case "inspect": {
+      if (!arg) return { ok: false, text: "inspect requires a task id" };
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "task", arg);
+    }
+    case "tail": {
+      if (!arg) return { ok: false, text: "tail requires a task id" };
+      if (effectiveChatId && messageId) {
+        scheduler.setProgressMessage(arg, effectiveChatId, messageId);
+      }
+      scheduler.setTail(arg, true);
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "task", arg);
+    }
+    case "untail": {
+      if (!arg) return { ok: false, text: "untail requires a task id" };
+      scheduler.setTail(arg, false);
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "task", arg);
+    }
+    case "taskpause": {
+      if (!arg) return { ok: false, text: "pause requires a task id" };
+      await scheduler.pauseTask(arg);
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "task", arg);
+    }
+    case "taskresume": {
+      if (!arg) return { ok: false, text: "resume requires a task id" };
+      await scheduler.resumeTask(arg);
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "task", arg);
+    }
+    case "taskstop": {
+      if (!arg) return { ok: false, text: "stop requires a task id" };
+      await scheduler.stopTask(arg, "user (menu)");
+      return rerenderPage(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, "tasks");
+    }
     case "status":
     case "help":
     case "doctor":
@@ -497,39 +826,61 @@ async function handleMenuCallback(
     case "templates":
     case "ledger":
     case "newtask": {
-      const hint: Record<string, string> = {
-        status: "Run `/automode status` here for the live list.",
-        help: "Send `/automode help` for the full command list.",
-        doctor: "Run `/automode doctor` to see SDK + agent diagnostics.",
-        defaults: "Run `/automode defaults` to see sticky prefs.",
-        templates: "Run `/automode templates` to list, `/automode template <name>` to start one.",
-        ledger: "Run `/automode ledger [day|week|month|all]` for cost breakdown.",
-        newtask: "Send `/automode <your goal>` to start a task. Or `/automode -y <goal>` for yolo, `/automode --dry-run <goal>` to simulate.",
-      };
-      if (tg?.sendMessageTelegram && effectiveChatId) {
-        await tg.sendMessageTelegram(effectiveChatId, hint[action]!, {
-          accountId: cfg.telegram.accountId,
-        }).catch(() => undefined);
+      // newtask still needs text input -> keep as a hint.
+      if (action === "newtask") {
+        const hint = "Send `/automode <your goal>` to start a task. Or `/automode -y <goal>` for yolo, `/automode --dry-run <goal>` to simulate.";
+        if (sdk && effectiveChatId) {
+          await sdk.sendMessage(effectiveChatId, hint, {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+          }).catch(() => undefined);
+        }
+        return { ok: true, text: hint };
       }
-      return { ok: true, text: hint[action]! };
+      // Inline-execute the real slash-command handler and stream the
+      // result. This keeps the menu button and the /automode subcommand
+      // strictly equivalent.
+      const commandArgs = action === "status" ? "status" : action;
+      try {
+        const result = await runAutomodeCommand(
+          scheduler,
+          { args: commandArgs, channel: "telegram", senderId: effectiveChatId },
+          cfg,
+          log,
+          prefs,
+          templates,
+        );
+        const body = result?.text ?? `(no output for ${action})`;
+        const clipped = body.length > 3500 ? body.slice(0, 3497) + "…" : body;
+        if (sdk && effectiveChatId) {
+          await sdk.sendMessage(effectiveChatId, "```\n" + clipped + "\n```", {
+            accountId: cfg.telegram.accountId,
+            textMode: "markdown",
+          }).catch(() => undefined);
+        }
+        return { ok: true, text: `ran ${action}` };
+      } catch (e) {
+        log.warn(`[automode] ${action} inline exec failed: ${(e as Error).message}`);
+        return { ok: false, text: (e as Error).message };
+      }
     }
     case "autonomy": {
       const level = parseAutonomyLevel(arg ?? "");
       if (!level) return { ok: false, text: "invalid autonomy level" };
       prefs?.set({ autonomy: level });
-      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `autonomy → ${level}`);
+      return rerenderRoot(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, `autonomy → ${level}`);
     }
     case "budget": {
       const n = Number(arg);
       if (!Number.isFinite(n) || n < 0) return { ok: false, text: "invalid budget" };
       prefs?.set({ budgetUsd: n });
-      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `budget → $${n.toFixed(2)}`);
+      return rerenderRoot(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, `budget → $${n.toFixed(2)}`);
     }
     case "verbose": {
       const n = Number(arg);
       if (!Number.isFinite(n) || n < 0 || n > 3) return { ok: false, text: "invalid verbosity" };
       prefs?.set({ verbosity: Math.floor(n) as 0 | 1 | 2 | 3 });
-      return rerenderRoot(tg, effectiveChatId, messageId, cfg, scheduler, prefs, log, `verbosity → ${n}`);
+      return rerenderRoot(sdk, effectiveChatId, messageId, cfg, scheduler, prefs, log, `verbosity → ${n}`);
     }
     default:
       return { ok: false, text: `unknown menu action: ${action}` };
@@ -537,28 +888,100 @@ async function handleMenuCallback(
 }
 
 async function rerenderRoot(
-  tg: TgApi | null,
+  sdk: Awaited<ReturnType<MultiChannelNotifier["getSdk"]>>,
   chatId: string | undefined,
   messageId: number | undefined,
   cfg: Parameters<typeof buildMenu>[2],
   scheduler: Parameters<typeof buildMenu>[1],
   prefs: Parameters<typeof buildMenu>[3],
-  log: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+  log: MenuLog,
   note: string,
 ): Promise<{ ok: boolean; text: string }> {
-  if (!tg?.editMessageTelegram || !chatId || !messageId) {
-    return { ok: true, text: note };
+  return rerenderPage(sdk, chatId, messageId, cfg, scheduler, prefs, log, "root", undefined, note);
+}
+
+async function rerenderPage(
+  sdk: Awaited<ReturnType<MultiChannelNotifier["getSdk"]>>,
+  chatId: string | undefined,
+  messageId: number | undefined,
+  cfg: Parameters<typeof buildMenu>[2],
+  scheduler: Parameters<typeof buildMenu>[1],
+  prefs: Parameters<typeof buildMenu>[3],
+  log: MenuLog,
+  page: MenuPage,
+  pageArg?: string,
+  note?: string,
+): Promise<{ ok: boolean; text: string }> {
+  if (!sdk || !chatId || !messageId) {
+    return { ok: true, text: note ?? `nav → ${page}` };
   }
-  const menu = buildMenu("root", scheduler, cfg, prefs);
+  const menu = buildMenu(page, scheduler, cfg, prefs, pageArg);
   try {
-    await tg.editMessageTelegram(chatId, messageId, menu.text, {
+    await sdk.editMessage(chatId, messageId, menu.text, {
       accountId: cfg.telegram.accountId,
+      textMode: "markdown",
       buttons: menu.buttons,
     });
   } catch (e) {
     log.warn(`[automode] menu rerender failed: ${(e as Error).message}`);
   }
-  return { ok: true, text: note };
+  return { ok: true, text: note ?? `nav → ${page}` };
+}
+
+/**
+ * Hint messages for the ➕/✏️/🗑/📋 buttons on the Templates menu. The
+ * buttons themselves don't mutate state; they explain the slash command
+ * the user should type. This is deliberate: Telegram inline keyboards
+ * can't accept text input, so template names + field values come in via
+ * the slash channel where we get proper audit + validation.
+ */
+function templateHint(action: string | undefined): string {
+  switch (action) {
+    case "new":
+      return [
+        "➕  *Create a template*",
+        "",
+        "`/automode template-new <name>`",
+        "",
+        "Then populate fields one at a time:",
+        "`/automode template-set <name> <field> <value>`",
+        "",
+        "Fields: description, goalTemplate, agent, autonomy, maxTurns, maxCostUsd, verbosity, onDone, onFail",
+      ].join("\n");
+    case "edit":
+      return [
+        "✏️  *Edit a template*",
+        "",
+        "`/automode template-set <name> <field> <value>`",
+        "",
+        "Examples:",
+        '`/automode template-set mine goalTemplate "fix failing tests in {{arg}}"`',
+        "`/automode template-set mine autonomy high`",
+        "`/automode template-set mine maxCostUsd 2`",
+        "",
+        "Built-ins are read-only. Clone one first:",
+        "`/automode template-clone <builtin>`",
+      ].join("\n");
+    case "clone":
+      return [
+        "📋  *Clone a built-in*",
+        "",
+        "`/automode template-clone <builtin> [new-name]`",
+        "",
+        "Omit `new-name` to shadow the built-in with your own copy.",
+        "Example: `/automode template-clone fix-tests mine-fix`",
+      ].join("\n");
+    case "delete":
+      return [
+        "🗑  *Delete a user template*",
+        "",
+        "`/automode template-delete <name>`",
+        "",
+        "Built-ins cannot be deleted — they're frozen.",
+      ].join("\n");
+    default:
+      return "Unknown template action. Open the Templates menu to see options.";
+  }
 }
 
 // Exported for tests.

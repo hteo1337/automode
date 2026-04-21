@@ -115,6 +115,8 @@ export type PlannerDecision = {
   confidence: number;
   subtasks: Array<{ id: string; agent: string; goal: string; dependsOn?: string[] }>;
   rationale: string;
+  /** 3-6 word human-readable title the planner derives from the goal. */
+  title?: string;
 };
 
 export type Escalation = {
@@ -138,6 +140,12 @@ export type TaskState = {
   id: string;
   version: 1;
   goal: string;
+  /**
+   * Short human-readable name for the task. Set to a heuristic clip of
+   * the goal on task creation, then overwritten by the planner when turn
+   * 0 finishes with a cleaner 3-6 word title.
+   */
+  title?: string;
   /** Identity of whoever started the task (set from CommandCtx). */
   owner?: TaskOwner;
   /** Cumulative USD cost observed from backend.runtime.getStatus snapshots. */
@@ -184,6 +192,12 @@ export type TaskState = {
     accountId?: string;
     startMessageId?: number;
     progressMessageId?: number;
+    /**
+     * When set, `notifyProgress` edits `progressMessageId` with a pinned
+     * "tailing" render that includes a Stop-tailing button. Cleared by
+     * the untail handler (or task completion).
+     */
+    tailActive?: boolean;
   };
 };
 
