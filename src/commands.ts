@@ -19,6 +19,7 @@ import { tailLogsForTask } from "./engine/logs.js";
 import type {
   AutomodeConfig,
   AutonomyLevel,
+  BackendId,
   StartOptions,
   TaskMode,
   TaskState,
@@ -54,7 +55,7 @@ function fmtTaskRow(s: TaskState): string {
 
 type ResolvedTarget = {
   agent: string;
-  backend: "acpx" | "claude-acp";
+  backend: BackendId;
   source: { agent: "flag" | "prefs" | "config"; backend: "flag" | "prefs" | "infer" | "config" };
 };
 
@@ -89,6 +90,7 @@ function buildInitWizard(cfg: AutomodeConfig, ctx: CommandCtx, prefs?: Preferenc
     "",
     `## Discovered on this host`,
     `• acpx agents:       [${cfg.discoveredAcpxAgents.join(", ") || "(none — configure plugins.entries.acpx.config.agents)"}]`,
+    `• native agents:     [${cfg.discoveredNativeAgents.join(", ") || "(none — configure agents.list[] in openclaw.json)"}]`,
     `• caller channel:    ${ctx.channel ?? "(unknown)"}${ctx.senderId ? ` / sender ${ctx.senderId}` : ""}`,
     `• resolved chatId:   ${chatId ?? "(none)"}`,
     ``,
@@ -212,14 +214,19 @@ function resolveTarget(
       ? "prefs"
       : "config";
 
-  let backend: "acpx" | "claude-acp";
+  let backend: BackendId;
   let backendSource: ResolvedTarget["source"]["backend"];
-  if (flagBackend === "acpx" || flagBackend === "claude-acp") {
+  if (flagBackend === "acpx" || flagBackend === "claude-acp" || flagBackend === "openclaw-native") {
     backend = flagBackend;
     backendSource = "flag";
   } else if (p.defaultBackend) {
     backend = p.defaultBackend;
     backendSource = "prefs";
+  } else if (cfg.agentOriginById?.[agent] === "native") {
+    // The agent is declared in openclaw.json's `agents.list[]` and has no
+    // ACP wrapper — route it through the native runtime automatically.
+    backend = "openclaw-native";
+    backendSource = "infer";
   } else if (flagAgent || p.defaultAgent) {
     // When the agent was chosen explicitly (flag or prefs), auto-infer the
     // best backend rather than inheriting the plugin config (which may still
@@ -344,10 +351,14 @@ export async function runAutomodeCommand(
           ].join("\n"),
         };
       }
-      const patch: { defaultAgent: string; defaultBackend?: "acpx" | "claude-acp" } = {
+      const patch: { defaultAgent: string; defaultBackend?: BackendId } = {
         defaultAgent: tail,
       };
-      if (subFlags.backend === "acpx" || subFlags.backend === "claude-acp") {
+      if (
+        subFlags.backend === "acpx" ||
+        subFlags.backend === "claude-acp" ||
+        subFlags.backend === "openclaw-native"
+      ) {
         patch.defaultBackend = subFlags.backend;
       }
       prefs.set(patch);
@@ -828,7 +839,12 @@ async function handleShadow(
         goal,
         mode: "hybrid",
         agent,
-        backend: subFlags.backend === "acpx" || subFlags.backend === "claude-acp" ? subFlags.backend : undefined,
+        backend:
+          subFlags.backend === "acpx" ||
+          subFlags.backend === "claude-acp" ||
+          subFlags.backend === "openclaw-native"
+            ? subFlags.backend
+            : undefined,
         autonomy: subFlags.autonomy ?? prefs?.get().autonomy ?? cfg.autonomy,
         verbosity: subFlags.verbosity ?? cfg.verbosity,
         dryRun: Boolean(subFlags.dryRun),
@@ -867,7 +883,8 @@ export function helpText(): string {
     "",
     "Per-task flag overrides (can appear anywhere):",
     "  --agent=<id> | -a <id>                 Pick agent for this task only",
-    "  --backend=<acpx|claude-acp> | -b <id>  Pick ACP backend (auto when omitted)",
+    "  --backend=<acpx|claude-acp|openclaw-native> | -b <id>",
+    "                                         Pick backend (auto when omitted)",
     "  --autonomy=<level> | --yolo | -y       strict|normal|high|yolo|super-yolo",
     "  --super-yolo | --unsafe | -yy          🚨 no tool guards (bypass everything)",
     "  --verbose=<0-3> | -v | -vv | -vvv      Live Telegram verbosity",
@@ -945,9 +962,17 @@ async function doctor(
       `Configured backend: ${cfg.backend}`,
       `Configured defaultAgent: ${cfg.defaultAgent}`,
       `Configured fallbackAgents: [${cfg.fallbackAgents.join(", ")}]`,
-      `Discovered acpx agents: [${cfg.discoveredAcpxAgents.join(", ") || "(none — configure plugins.entries.acpx.config.agents)"}]`,
+      `Discovered acpx agents:  [${cfg.discoveredAcpxAgents.join(", ") || "(none — configure plugins.entries.acpx.config.agents)"}]`,
+      `Discovered native agents: [${cfg.discoveredNativeAgents.join(", ") || "(none — configure agents.list[] in openclaw.json)"}]`,
       `Health probe: ${cfg.healthProbeEnabled ? "on" : "off"}   Max fallbacks: ${cfg.maxFallbacks}`,
     );
+    if (cfg.discoveredNativeAgents.length > 0) {
+      lines.push(
+        "",
+        "Native agents dispatch via plugin-sdk/agent-runtime (agentCommand()).",
+        "Per-agent models (from openclaw.json agents.list[].model.primary):",
+      );
+    }
   }
   if (prefs) {
     const p = prefs.get();

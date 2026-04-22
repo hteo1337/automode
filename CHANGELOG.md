@@ -4,6 +4,81 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-22
+
+### Added — Native openclaw agent support (new `openclaw-native` backend)
+Before 0.6.0, automode only saw agents registered via the `acpx` plugin
+(`plugins.entries.acpx.config.agents`). Agents declared in openclaw.json's
+top-level `agents.list[]` block — the **native** openclaw agent registry,
+e.g. `main`, `coder`, `fast`, `critic` routed to Kimi/Fireworks — were
+completely invisible. `/automode doctor` didn't show them, and selecting
+one as `defaultAgent` would fail with "ACP backend not registered".
+
+- **New backend id `openclaw-native`** added to the backend union alongside
+  `acpx` and `claude-acp`. Manifest enum + `BackendId` type updated.
+- **New adapter `src/agents/native-runtime.ts`** wraps
+  `agentCommand()` from `openclaw/plugin-sdk/agent-runtime` so it satisfies
+  the same `AcpBackend` interface automode already understands. The adapter:
+  - Lazy-loads the SDK with the same multi-strategy loader as `telegram/sdk.ts`
+    (bare specifier → file-URL import from every discovered openclaw root).
+  - Manages `{sessionId, sessionKey}` per automode task so subsequent turns
+    resume the same persisted transcript.
+  - Converts the one-shot `Promise<{payloads, meta}>` return into the
+    ACP-style `AsyncIterable` of `text_delta | done | error` events that
+    `Dispatcher.runTurn()` yields.
+  - Estimates per-turn cost from `meta.agentMeta.lastCallUsage` and emits
+    it on the `done` event so the ledger + budget enforcement keep working.
+  - Propagates an `AbortSignal` so `/automode stop` halts a running turn.
+- **Discovery now scans both surfaces.** `discoverAcpxAgents()` was extended
+  (kept the name for back-compat) to also read `agents.list[]` and tag each
+  discovered id with its origin (`acpx` / `native`) via a new `originById`
+  map. New `backendForAgent()` helper picks the right backend per id.
+- **Per-agent backend auto-routing.** `Scheduler.startTask()` and
+  `commands.ts::resolveTarget()` both check `cfg.agentOriginById[agent]`: if
+  the chosen agent is native, the backend is auto-set to `openclaw-native`,
+  even when the plugin's default `cfg.backend` says `claude-acp`. User
+  can always override with `--backend=<id>`.
+- **Dispatcher per-candidate routing.** `Dispatcher.ensure()` calls
+  `resolveBackend(openclaw-native)` when the current fallback candidate is a
+  native agent, `resolveBackend(backendId)` otherwise — so a mixed fallback
+  chain (`[claude-bf, kimi]`) correctly hops from ACP → native mid-chain.
+
+### Added — `/automode doctor` surfaces both registries
+`/automode doctor` now shows:
+```
+Discovered acpx agents:   [claude, claude-bf, claude-vertex-opus47]
+Discovered native agents: [main, coder, fast, critic]
+```
+`/automode init` snapshot includes the native list too. Boot-time log
+prints both groups separately so you can tell at a glance which agents are
+available on this host. If both are empty, the old error message is
+updated to mention `agents.list[]` as the second remediation path.
+
+### Added — Tests
+- 9 new cases in `src/agents/discovery.test.ts` cover native extraction,
+  acpx/native collision, malformed `agents.list`, `backendForAgent`.
+
+### Changed — Type union widening
+`BackendId` is now a named export in `types.ts` (was inlined in several
+places as `"acpx" | "claude-acp"`). No runtime shape changes; no migration
+needed for existing tasks — `TaskState.config.backend` remains the same
+field, just with one more allowed value.
+
+### Notes / limitations
+- Native runtime is **one-shot per turn**: unlike ACP's streamed
+  `text_delta`, the native backend emits a single `text_delta` (or none)
+  followed by `done`. This matches the underlying `agentCommand()` surface
+  — no mid-turn progress events. If you need true token-streaming, stick
+  with ACP. Automode's progress display still edits the Telegram message on
+  every `done`, so UX is equivalent for most workflows.
+- **Cost estimation is approximate** — ~$0.002 / 1K input, ~$0.006 / 1K
+  output blended rate. The runtime's own per-model pricing table isn't
+  exposed; we under-estimate intentionally so budget caps don't over-fire.
+- Model fallbacks (`agents.list[].model.fallbacks`) are handled transparently
+  by the native runtime. Automode's `fallbackAgents` chain applies on top
+  of that — if the whole native agent fails, automode can still fall back
+  to a different agent altogether.
+
 ## [0.5.1] — 2026-04-21
 
 ### Fixed — Telegram menu actually works

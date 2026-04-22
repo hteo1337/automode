@@ -95,7 +95,14 @@ export class Scheduler {
       },
       config: {
         defaultAgent: opts.agent ?? this.cfg.defaultAgent,
-        backend: opts.backend ?? this.cfg.backend,
+        // Auto-route native agents to the openclaw-native backend when the
+        // caller didn't pick one explicitly. The per-agent origin map is
+        // populated by discovery at boot time.
+        backend:
+          opts.backend ??
+          (this.cfg.agentOriginById?.[opts.agent ?? this.cfg.defaultAgent] === "native"
+            ? "openclaw-native"
+            : this.cfg.backend),
         allowedTools: this.cfg.allowedTools,
         deniedBashPatterns: this.cfg.deniedBashPatterns,
         parallelismPolicy: this.cfg.parallelismPolicy,
@@ -349,6 +356,7 @@ export class Scheduler {
             cwd: state.cwd,
             preferredAgent: state.config.defaultAgent,
             cfg: this.cfg,
+            taskBackend: state.config.backend,
           }),
         );
         if (plannerEnsure.tried.length > 1) {
@@ -516,6 +524,7 @@ export class Scheduler {
             cwd: state.cwd,
             preferredAgent: state.config.defaultAgent,
             cfg: this.cfg,
+            taskBackend: state.config.backend,
           }),
         );
         if (ensureResult.tried.length > 1) {

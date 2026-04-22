@@ -8,7 +8,7 @@ export type TaskTemplate = {
   goal?: string;
   goalTemplate?: string;   // supports {{arg}} substitution
   agent?: string;
-  backend?: "acpx" | "claude-acp";
+  backend?: "acpx" | "claude-acp" | "openclaw-native";
   autonomy?: "strict" | "normal" | "high" | "yolo" | "super-yolo";
   verbosity?: 0 | 1 | 2 | 3;
   maxTurns?: number;
@@ -253,7 +253,7 @@ function applyKey(t: TaskTemplate, key: string, value: string): void {
       t.agent = value;
       break;
     case "backend":
-      if (value === "acpx" || value === "claude-acp") t.backend = value;
+      if (value === "acpx" || value === "claude-acp" || value === "openclaw-native") t.backend = value;
       break;
     case "autonomy": {
       const v = value as TaskTemplate["autonomy"];
@@ -390,8 +390,8 @@ function coerceField(
     case "onFail":
       return { ok: true, patch: { [field]: v } };
     case "backend":
-      if (v !== "acpx" && v !== "claude-acp") {
-        return { ok: false, error: `backend must be 'acpx' or 'claude-acp'` };
+      if (v !== "acpx" && v !== "claude-acp" && v !== "openclaw-native") {
+        return { ok: false, error: `backend must be 'acpx', 'claude-acp', or 'openclaw-native'` };
       }
       return { ok: true, patch: { backend: v } };
     case "autonomy":

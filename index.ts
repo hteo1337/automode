@@ -62,9 +62,20 @@ export default {
       log.info(
         `[automode] discovered acpx agents: ${cfg.discoveredAcpxAgents.join(", ")}`,
       );
-    } else {
+    }
+    // Filter out natives that also have an ACP wrapper — those route via
+    // acpx (origin=acpx wins collisions), so listing them here is noise.
+    const nativeOnly = cfg.discoveredNativeAgents.filter(
+      (id) => cfg.agentOriginById[id] === "native",
+    );
+    if (nativeOnly.length > 0) {
+      log.info(
+        `[automode] discovered native openclaw agents (agents.list[] only): ${nativeOnly.join(", ")} — dispatch via plugin-sdk/agent-runtime`,
+      );
+    }
+    if (cfg.discoveredAcpxAgents.length === 0 && cfg.discoveredNativeAgents.length === 0) {
       log.warn(
-        `[automode] no acpx agents discovered from root config. "auto" will resolve to '${cfg.defaultAgent}'. Configure plugins.entries.acpx.config.agents or set defaultAgent explicitly.`,
+        `[automode] no agents discovered from root config. "auto" will resolve to '${cfg.defaultAgent}'. Configure plugins.entries.acpx.config.agents or agents.list[] in openclaw.json.`,
       );
     }
     // Boot-time config sanity checks — warn on drift the user can fix.

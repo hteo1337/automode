@@ -5,7 +5,7 @@ import type { AutonomyLevel, VerbosityLevel } from "../types.js";
 
 export type Prefs = {
   defaultAgent?: string;
-  defaultBackend?: "acpx" | "claude-acp";
+  defaultBackend?: "acpx" | "claude-acp" | "openclaw-native";
   verbosity?: VerbosityLevel;
   autonomy?: AutonomyLevel;
   budgetUsd?: number;
@@ -73,7 +73,7 @@ export class Preferences {
  * one explicitly. Claude-family agents run fastest through the persistent
  * `claude-acp` pool; everything else uses the generic `acpx` runtime.
  */
-export function inferBackend(agent: string): "acpx" | "claude-acp" {
+export function inferBackend(agent: string): "acpx" | "claude-acp" | "openclaw-native" {
   const a = (agent ?? "").toLowerCase();
   if (/^claude|\bclaude-|opus|sonnet|haiku|vertex-opus|claude-bf/.test(a)) {
     return "claude-acp";

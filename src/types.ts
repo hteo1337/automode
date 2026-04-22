@@ -9,6 +9,17 @@ export type RetryPolicyConfig = {
 export type VerbosityLevel = 0 | 1 | 2 | 3;
 
 /**
+ * Which ACP-style runtime backend dispatches a task's turns.
+ *
+ *   acpx           — the bundled acpx extension that wraps CLI agents
+ *   claude-acp     — the optional `claude-acp` plugin (persistent Claude pool)
+ *   openclaw-native — automode's adapter over `plugin-sdk/agent-runtime`
+ *                    (agentCommand()), used for agents declared in
+ *                    openclaw.json's `agents.list[]` (e.g. Kimi-via-Fireworks).
+ */
+export type BackendId = "acpx" | "claude-acp" | "openclaw-native";
+
+/**
  * Autonomy level controls how often the task escalates to a human AND
  * whether the tool allow/deny rails apply at all.
  *
@@ -46,7 +57,7 @@ export type AutomodeConfig = {
     minWords: number;
     verbs: string[];
   };
-  backend: "acpx" | "claude-acp";
+  backend: BackendId;
   maxTurns: number;
   maxDurationSec: number;
   maxParallel: number;
@@ -71,6 +82,13 @@ export type AutomodeConfig = {
   schedulerTickMs: number;
   /** Populated at plugin boot from acpx config; not user-editable. */
   discoveredAcpxAgents: string[];
+  /** Populated at plugin boot from openclaw `agents.list[]`; not user-editable. */
+  discoveredNativeAgents: string[];
+  /**
+   * Per-id origin so the dispatcher picks the right backend ("acpx" /
+   * "claude-acp" for ACP agents, "openclaw-native" for agents.list[]).
+   */
+  agentOriginById: Record<string, "acpx" | "native">;
 };
 
 export type TaskMode = "goal" | "interval" | "paced" | "hybrid";
@@ -167,7 +185,7 @@ export type TaskState = {
   caps: { maxTurns: number; maxDurationSec: number };
   config: {
     defaultAgent: string;
-    backend: "acpx" | "claude-acp";
+    backend: BackendId;
     allowedTools: string[];
     deniedBashPatterns: string[];
     parallelismPolicy: "auto" | "ask" | "never" | "always";
@@ -207,7 +225,7 @@ export type StartOptions = {
   planFirst?: boolean;
   intervalSec?: number;
   agent?: string;
-  backend?: "acpx" | "claude-acp";
+  backend?: BackendId;
   maxTurns?: number;
   maxDurationSec?: number;
   maxCostUsd?: number;

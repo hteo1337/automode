@@ -60,6 +60,8 @@ export const DEFAULT_CONFIG: AutomodeConfig = {
   stateDir: "~/.openclaw/automode",
   schedulerTickMs: 5000,
   discoveredAcpxAgents: [],
+  discoveredNativeAgents: [],
+  agentOriginById: {},
   maxCostUsd: 0,
   auditArgMaxChars: 2000,
   retryBackoffMs: 500,
@@ -124,8 +126,10 @@ export function resolveConfig(raw: unknown, openclawRootConfig?: unknown): Autom
   };
   out.stateDir = expandHome(out.stateDir);
   out.agentRegistryPaths = (out.agentRegistryPaths ?? []).map(expandHome);
-  const { ids } = discoverAcpxAgents(openclawRootConfig);
-  out.discoveredAcpxAgents = ids;
+  const discovery = discoverAcpxAgents(openclawRootConfig);
+  out.discoveredAcpxAgents = discovery.acpxIds;
+  out.discoveredNativeAgents = discovery.nativeIds;
+  out.agentOriginById = discovery.originById;
   return out;
 }
 

@@ -7,8 +7,32 @@ import {
   type RetryPolicy,
 } from "./fallback.js";
 import { importSdk } from "./sdk-loader.js";
+import { loadNativeAgentSdk, makeNativeBackend } from "./native-runtime.js";
 
 const ACP_RUNTIME_SPEC = "openclaw/plugin-sdk/acp-runtime";
+const NATIVE_BACKEND_ID = "openclaw-native";
+
+/**
+ * Lazily-constructed singleton for the native backend. Only one is ever
+ * needed — the backend is stateless itself, and session state lives in its
+ * internal map.
+ */
+let nativeBackendPromise: Promise<unknown> | null = null;
+
+async function resolveNativeBackend(logger: AnyLogger): Promise<unknown> {
+  if (!nativeBackendPromise) {
+    nativeBackendPromise = (async () => {
+      const sdk = await loadNativeAgentSdk(logger);
+      if (!sdk) {
+        throw new Error(
+          "automode: native agent runtime not found. The plugin SDK module 'openclaw/plugin-sdk/agent-runtime' could not be loaded from any install root.",
+        );
+      }
+      return makeNativeBackend(sdk, logger);
+    })();
+  }
+  return nativeBackendPromise;
+}
 
 type AnyLogger = { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 
@@ -53,6 +77,12 @@ export type AcpBackend = {
  * installed openclaw, a nemoclaw bundle, or a dev workspace.
  */
 export async function resolveBackend(id: string, logger: AnyLogger): Promise<AcpBackend> {
+  // Native backend: dispatches via plugin-sdk/agent-runtime's agentCommand()
+  // rather than an ACP runtime. Used for agents declared in openclaw.json's
+  // `agents.list[]` (e.g. Kimi-via-Fireworks native agents).
+  if (id === NATIVE_BACKEND_ID) {
+    return (await resolveNativeBackend(logger)) as AcpBackend;
+  }
   let mod: unknown;
   try {
     const result = await importSdk(ACP_RUNTIME_SPEC);
@@ -103,9 +133,15 @@ export type DispatchContext = {
   cwd: string;
   preferredAgent: string;                   // "auto" allowed
   explicitFallbacks: string[];              // config.fallbackAgents
-  discoveredAgents: string[];               // config.discoveredAcpxAgents
+  discoveredAgents: string[];               // acpx + native, deduped
   defaultHint?: string;                     // config.defaultAgent (original, for final safety net)
-  backendId: string;
+  backendId: string;                        // default backend for ACP-origin agents
+  /**
+   * Per-id origin map. If an agent's origin is "native", the dispatcher
+   * routes via the openclaw-native backend regardless of `backendId`. Missing
+   * entries fall back to the ACP path, preserving pre-0.6.0 behavior.
+   */
+  agentOriginById?: Record<string, "acpx" | "native">;
   env?: Record<string, string>;
   healthProbeEnabled: boolean;
   retryPolicy: RetryPolicy;
@@ -133,15 +169,15 @@ export class Dispatcher {
       defaultHint: ctx.defaultHint,
       maxLength: ctx.maxFallbacks + 1,
     });
-    // If the chain collapsed to just the sentinel "auto" it means no acpx
-    // agents were discovered AND no concrete default was provided. Fail fast
-    // with a useful remediation message rather than punting to the backend
-    // which would just 404.
+    // If the chain collapsed to just the sentinel "auto" it means no agents
+    // (acpx OR native) were discovered AND no concrete default was provided.
+    // Fail fast with a useful remediation message rather than punting to the
+    // backend which would just 404.
     const onlyAutoSentinel =
       chain.length === 1 && chain[0] === "auto" && ctx.discoveredAgents.length === 0;
     if (onlyAutoSentinel) {
       throw new Error(
-        "automode: no acpx agents available. Configure plugins.entries.acpx.config.agents in your openclaw.json, or set plugins.entries.automode.config.defaultAgent to a concrete agent id.",
+        "automode: no agents available. Configure plugins.entries.acpx.config.agents (ACP wrappers) or agents.list[] (native openclaw agents) in your openclaw.json, or set plugins.entries.automode.config.defaultAgent to a concrete agent id.",
       );
     }
     const tried: string[] = [];
@@ -157,7 +193,13 @@ export class Dispatcher {
         await new Promise((r) => setTimeout(r, delay));
       }
       try {
-        backend = await resolveBackend(ctx.backendId, this.logger);
+        // Per-agent backend routing: if this candidate agent is a native
+        // openclaw agent (from agents.list[]), force the native backend
+        // even when cfg.backend says otherwise. ACP agents keep whatever
+        // backendId the caller chose.
+        const effectiveBackend =
+          ctx.agentOriginById?.[agent] === "native" ? NATIVE_BACKEND_ID : ctx.backendId;
+        backend = await resolveBackend(effectiveBackend, this.logger);
         const handle = await backend.runtime.ensureSession({
           sessionKey: `automode-${ctx.taskId}`,
           agent,
