@@ -1,6 +1,6 @@
 {
   "name": "@oc-moth/automode",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Autonomous focus mode for OpenClaw \u2014 goal-driven, multi-agent, tool-allowlisted, Telegram-supervised.",
   "license": "MIT",
   "author": "moth",

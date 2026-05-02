@@ -113,7 +113,10 @@ export class TelegramNotifier {
       `agent: ${task.config.defaultAgent} (${task.config.backend})`,
       ...(superYoloWarning ? [``, superYoloWarning] : []),
       ``,
-      `goal: ${task.goal}`,
+      // Cap goal to keep us safely below Telegram's 4096-char message limit
+      // even after counting markdown overhead — long /automode prompts
+      // (1k+ chars) otherwise trigger 400 "message is too long".
+      `goal: ${task.goal.length > 1500 ? `${task.goal.slice(0, 1500)} …(+${task.goal.length - 1500} chars)` : task.goal}`,
     ].join("\n");
     try {
       const sdk = await this.sdk();

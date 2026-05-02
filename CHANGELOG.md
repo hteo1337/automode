@@ -4,6 +4,19 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] — 2026-05-02
+
+### Fixed — `notifyStart` 400 "message is too long" on long prompts
+
+Long `/automode` goals (1k+ chars, common when default-mode routes a chat
+message into automode via the verb-or-length gate) pushed the start
+notification past Telegram's 4096-character message limit, causing a
+400 from `sendMessage` and no start notification appearing in chat.
+
+- `src/telegram/notifier.ts` — `notifyStart` now truncates the goal to
+  1500 chars with a `…(+N chars)` suffix, leaving comfortable headroom
+  for the surrounding header lines and markdown formatting.
+
 ## [0.6.1] — 2026-05-02
 
 ### Fixed — Telegram outbound notifications throw "Telegram API context requires a resolved runtime config"
