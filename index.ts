@@ -583,6 +583,20 @@ export default {
         }
 
         // (b) Default-to-automode routing.
+        //
+        // 0.6.3: hard-skip for automode's own internal sub-agent dispatches.
+        // The native runtime uses `sessionKey="automode-<taskId>(-suffix)"`
+        // for planner/worker/turn dispatches; `before_prompt_build` fires for
+        // those just like for inbound user messages, and `extractHookChatId`
+        // would fall back to `cfg.telegram.chatId` (no real chatId is bound
+        // to a sub-agent dispatch) — which combined with a per-chat
+        // `chatDefaults[<chatId>]=true` override caused infinite recursion:
+        // every planner prompt got routed as a NEW automode task, whose
+        // planner prompt got routed as another task, etc. (#2)
+        const hookSessionKey = (hctx as { sessionKey?: string } | undefined)?.sessionKey;
+        if (typeof hookSessionKey === "string" && hookSessionKey.startsWith("automode-")) {
+          return undefined;
+        }
         const decision = shouldRouteToAutomode(prompt, chatId, cfg, prefs);
         if (!decision.route) return undefined;
         const state = await scheduler.startTask({
@@ -710,6 +724,14 @@ function resolveChatId(ctx: { channel?: string; senderId?: string }, cfgChatId: 
 function extractHookChatId(hctx: unknown, cfgChatId: string | undefined): string | undefined {
   const h = hctx as Record<string, unknown> | undefined;
   if (!h) return cfgChatId;
+  // 0.6.3: never resolve a chatId for automode's own sub-agent dispatches.
+  // Their sessionKey is "automode-<taskId>" — there's no real Telegram
+  // chat bound to them, and falling back to cfg.telegram.chatId combined
+  // with a per-chat override caused recursive task creation (#2).
+  const sessionKey = h.sessionKey;
+  if (typeof sessionKey === "string" && sessionKey.startsWith("automode-")) {
+    return undefined;
+  }
   const candidates: string[] = [];
   for (const k of ["sessionKey", "channelId", "sessionId", "conversationId", "chatId"]) {
     const v = h[k];

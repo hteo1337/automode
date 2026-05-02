@@ -4,6 +4,34 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] — 2026-05-02
+
+### Fixed — `before_prompt_build` hook recursively spawns tasks from automode's own sub-agent dispatches (#2)
+
+Every agent prompt build fires the `before_prompt_build` hook, including
+automode's own planner / worker / turn dispatches via the native runtime.
+The hook unconditionally called `extractHookChatId(hctx, cfg.telegram.chatId)`,
+which — for automode-originated dispatches with `sessionKey="automode-<taskId>"`
+and no real Telegram source — silently fell back to `cfg.telegram.chatId`.
+That synthetic chatId then matched a per-chat preference override
+(`prefs.chatDefaults["telegram:<id>"] === true`) which forced default-mode
+on for that chat regardless of the global `defaultMode.enabled=false` flag.
+Result: every planner prompt was routed as a NEW automode task, whose
+planner prompt was routed as another task, etc. — a single Telegram-routed
+task could spawn 200+ persisted task dirs in minutes, all with `goal` set
+to the planner's system prompt. They all then raced toward `maxCostUsd`
+and ended up `capped`.
+
+- `index.ts` — `before_prompt_build` hook now hard-skips routing when
+  `hctx.sessionKey` starts with `automode-`. Native runtime sub-agent
+  dispatches no longer leak as new top-level tasks.
+- `index.ts` — `extractHookChatId` returns `undefined` (not the cfg
+  fallback) for `automode-`-prefixed sessions, so even if a future hook
+  inadvertently calls into routing logic for sub-agent dispatches, it
+  cannot resolve to a real chatId.
+
+Closes [#2](https://github.com/hteo1337/automode/issues/2).
+
 ## [0.6.2] — 2026-05-02
 
 ### Fixed — `notifyStart` 400 "message is too long" on long prompts
