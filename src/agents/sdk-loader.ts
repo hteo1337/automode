@@ -72,6 +72,9 @@ export function findOpenclawRoots(): string[] {
       : undefined,
     // NemoClaw bundle
     path.join(os.homedir(), ".nemoclaw", "source", "node_modules", "openclaw"),
+    // OpenClaw sidecar (self-contained install under ~/.openclaw)
+    path.join(os.homedir(), ".openclaw", "lib", "node_modules", "openclaw"),
+    path.join(os.homedir(), ".openclaw", "tools", "node", "lib", "node_modules", "openclaw"),
   ];
   for (const c of candidates) {
     if (c && safeExists(path.join(c, "package.json"))) roots.add(c);

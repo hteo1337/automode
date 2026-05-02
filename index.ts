@@ -100,7 +100,11 @@ export default {
     const prefs = new Preferences(cfg.stateDir);
     const templates = makeTemplateStore(cfg.stateDir);
     const dispatcher = new Dispatcher(log);
-    const notifier = new MultiChannelNotifier(api.runtime, cfg, log);
+    // 0.6.1: pass `api.config` (resolved openclaw runtime config) to the
+    // notifier so the bundled `sendMessageTelegram` gets `opts.cfg`. Without
+    // it, every Telegram send throws "Telegram API context requires a
+    // resolved runtime config" and notifications silently no-op.
+    const notifier = new MultiChannelNotifier(api.runtime, cfg, log, api.config);
     const metrics = buildMetrics(api.runtime, log);
     const scheduler = new Scheduler(
       cfg,
@@ -340,7 +344,7 @@ export default {
     // message_received sees the clean callback content BEFORE it's wrapped
     // in an agent envelope. Can't suppress the agent from here (void return),
     // but we CAN send the submenu / mutate prefs proactively. The
-    // before_agent_start branch below still fires to steer the agent's
+    // before_prompt_build branch below still fires to steer the agent's
     // own one-liner reply.
     api.on?.("message_received", async (ev, c) => {
       diag("message_received", ev, c);
@@ -492,12 +496,7 @@ export default {
         log.warn(`[automode] message_received menu-cb error: ${(err as Error).message}`);
       }
     });
-    api.on?.("before_prompt_build", (ev, c) => {
-      diag("before_prompt_build", ev, c);
-      return undefined;
-    });
-
-    // 4.5) before_agent_start interceptor. Two responsibilities:
+    // 4.5) before_prompt_build interceptor. Two responsibilities:
     //   (a) Menu callback_data (automode:menu:…): OpenClaw's Telegram plugin
     //       dispatches button taps into the agent pipeline as inbound text.
     //       We recognise our namespace, handle it (mutate prefs, send a
@@ -505,8 +504,12 @@ export default {
     //       the agent send a 1-line ACK so we don't burn tokens.
     //   (b) Default-to-automode routing: if enabled for this chat and the
     //       message passes the heuristic gate, spawn a task and ACK.
-    api.on?.("before_agent_start", async (event, hctx) => {
-      diag("before_agent_start", event, hctx);
+    // Migrated from legacy before_agent_start per plugin-compat guidance
+    // (2026.4.21): returns only prompt-mutation fields (systemPrompt), which
+    // is the exclusive domain of before_prompt_build. No model override is
+    // emitted, so before_model_resolve is unnecessary.
+    api.on?.("before_prompt_build", async (event, hctx) => {
+      diag("before_prompt_build", event, hctx);
       try {
         const hookEvent = event as { prompt?: string };
         const ctxObj = hctx as { channel?: string; senderId?: string; chatId?: string };
@@ -598,7 +601,7 @@ export default {
             `Do not attempt to answer the user's request — it is being handled autonomously.`,
         };
       } catch (err) {
-        log.warn(`[automode] before_agent_start hook error: ${(err as Error).message}`);
+        log.warn(`[automode] before_prompt_build hook error: ${(err as Error).message}`);
         return undefined;
       }
     });

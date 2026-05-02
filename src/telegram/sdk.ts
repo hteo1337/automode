@@ -48,9 +48,43 @@ export type TelegramSdk = {
  * .sendMessageTelegram` which silently returned `undefined` on every host —
  * so every Telegram notification (start / progress / done / escalation /
  * verbose / menu) was a no-op.
+ *
+ * 0.6.1 fix: openclaw 2026.4.x's bundled `sendMessageTelegram` requires a
+ * resolved runtime config in `opts.cfg` (validated by `requireRuntimeConfig`).
+ * We accept the runtime config at SDK load time and inject it into `opts.cfg`
+ * for every send/edit call, so existing call sites remain unchanged.
  */
-export async function loadTelegramSdk(logger: Logger): Promise<TelegramSdk | null> {
+export async function loadTelegramSdk(
+  logger: Logger,
+  runtimeConfig?: unknown,
+): Promise<TelegramSdk | null> {
   const attempts: string[] = [];
+
+  const wrapWithCfg = (
+    rawSend: TelegramSdk["sendMessage"],
+    rawEdit: TelegramSdk["editMessage"] | undefined,
+    rawEditRm: TelegramSdk["editReplyMarkup"] | undefined,
+    loadedFrom: string,
+  ): TelegramSdk => {
+    // Only inject `cfg` when the runtime config is actually available and
+    // the caller hasn't already provided one. Preserves bare-call semantics
+    // where a future openclaw release threads cfg internally.
+    const inject = (opts: unknown): unknown => {
+      if (!runtimeConfig) return opts;
+      const o = (opts ?? {}) as Record<string, unknown>;
+      return { ...o, cfg: o.cfg ?? runtimeConfig };
+    };
+    return {
+      sendMessage: (to, text, opts) => rawSend(to, text, inject(opts) as never),
+      editMessage: rawEdit
+        ? (chatId, messageId, text, opts) => rawEdit(chatId, messageId, text, inject(opts) as never)
+        : fallbackUnsupported("editMessage"),
+      editReplyMarkup: rawEditRm
+        ? (chatId, messageId, buttons, opts) => rawEditRm(chatId, messageId, buttons, inject(opts) as never)
+        : fallbackUnsupported("editReplyMarkup"),
+      loadedFrom,
+    };
+  };
 
   // Strategy 1 — bare specifier, in case a future openclaw version exports it.
   for (const spec of ["openclaw/plugin-sdk/telegram", "openclaw/extensions/telegram/runtime-api"]) {
@@ -60,12 +94,7 @@ export async function loadTelegramSdk(logger: Logger): Promise<TelegramSdk | nul
       const edit = mod.editMessageTelegram as TelegramSdk["editMessage"] | undefined;
       const editRm = mod.editMessageReplyMarkupTelegram as TelegramSdk["editReplyMarkup"] | undefined;
       if (typeof send === "function") {
-        return {
-          sendMessage: send,
-          editMessage: edit ?? fallbackUnsupported("editMessage"),
-          editReplyMarkup: editRm ?? fallbackUnsupported("editReplyMarkup"),
-          loadedFrom: `import:${spec}`,
-        };
+        return wrapWithCfg(send, edit, editRm, `import:${spec}`);
       }
       attempts.push(`${spec}: no sendMessageTelegram`);
     } catch (e) {
@@ -86,13 +115,10 @@ export async function loadTelegramSdk(logger: Logger): Promise<TelegramSdk | nul
       const edit = mod.editMessageTelegram as TelegramSdk["editMessage"] | undefined;
       const editRm = mod.editMessageReplyMarkupTelegram as TelegramSdk["editReplyMarkup"] | undefined;
       if (typeof send === "function") {
-        logger.info(`[automode] telegram SDK loaded from ${candidate}`);
-        return {
-          sendMessage: send,
-          editMessage: edit ?? fallbackUnsupported("editMessage"),
-          editReplyMarkup: editRm ?? fallbackUnsupported("editReplyMarkup"),
-          loadedFrom: candidate,
-        };
+        logger.info(
+          `[automode] telegram SDK loaded from ${candidate}${runtimeConfig ? " (runtime cfg injection enabled)" : " (no runtime cfg — sends will fail until cfg is wired)"}`,
+        );
+        return wrapWithCfg(send, edit, editRm, candidate);
       }
       attempts.push(`${candidate}: no sendMessageTelegram export`);
     } catch (e) {

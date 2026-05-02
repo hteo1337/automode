@@ -37,8 +37,15 @@ export class MultiChannelNotifier {
     private readonly runtime: unknown,
     private readonly cfg: AutomodeConfig,
     private readonly logger: AnyLogger,
+    /**
+     * Resolved openclaw runtime config (`api.config` from `register()`).
+     * Threaded down to `TelegramNotifier` so the bundled `sendMessageTelegram`
+     * receives `opts.cfg` (validated by `requireRuntimeConfig`). Optional to
+     * preserve backwards-compat with older callers.
+     */
+    runtimeConfig?: unknown,
   ) {
-    this.telegram = new TelegramNotifier(runtime, cfg, logger);
+    this.telegram = new TelegramNotifier(runtime, cfg, logger, runtimeConfig);
   }
 
   private sidekicks(): Array<(text: string) => Promise<void>> {

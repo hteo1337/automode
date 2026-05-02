@@ -4,6 +4,37 @@ All notable changes to `@oc-moth/automode` are documented here. The format follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-05-02
+
+### Fixed — Telegram outbound notifications throw "Telegram API context requires a resolved runtime config"
+
+OpenClaw 2026.4.x's bundled `sendMessageTelegram` validates `opts.cfg` via
+`requireRuntimeConfig(opts.cfg, "Telegram API context")`. The plugin's
+`TelegramNotifier` did not thread the resolved openclaw runtime config
+(`api.config` from `register()`) down to the SDK call sites, so every send
+(start / progress / done / escalation / verbose / menu) failed with the
+above error and notifications were silently dropped on hosts running the
+2026.4.x runtime.
+
+- `index.ts` — `register()` now passes `api.config` as a 4th argument to
+  `MultiChannelNotifier`.
+- `src/notifiers/multi.ts` — `MultiChannelNotifier` accepts a `runtimeConfig`
+  and forwards it to `TelegramNotifier`.
+- `src/telegram/notifier.ts` — `TelegramNotifier` stores `runtimeConfig`
+  and forwards it to `loadTelegramSdk()`.
+- `src/telegram/sdk.ts` — `loadTelegramSdk()` wraps the bundled
+  `sendMessageTelegram` / `editMessageTelegram` / `editMessageReplyMarkupTelegram`
+  exports so `cfg` is auto-injected into every `opts` object. Existing call
+  sites (notifier methods + `index.ts` menu sender) remain untouched. If
+  the caller already supplies `cfg` it wins — preserves bare-call semantics
+  for future openclaw releases that may thread cfg internally.
+- `src/agents/sdk-loader.ts` — `findOpenclawRoots()` now also discovers
+  the self-contained install at `~/.openclaw/lib/node_modules/openclaw`,
+  so the telegram runtime-api lookup succeeds on hosts that run the
+  homebrew sidecar (macOS) or the system-wide npm install (Linux/WSL).
+
+Closes [#1](https://github.com/hteo1337/automode/issues/1).
+
 ## [0.6.0] — 2026-04-22
 
 ### Added — Native openclaw agent support (new `openclaw-native` backend)

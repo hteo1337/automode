@@ -59,6 +59,14 @@ export class TelegramNotifier {
     _runtime: unknown, // kept for backwards-compat with existing call sites
     private readonly cfg: AutomodeConfig,
     private readonly logger: AnyLogger,
+    /**
+     * Resolved openclaw runtime config (`api.config` from register()).
+     * The bundled `sendMessageTelegram` validates this via
+     * `requireRuntimeConfig(opts.cfg, ...)`, so without it every Telegram
+     * call throws "Telegram API context requires a resolved runtime config".
+     * Optional for backwards-compat with older callers.
+     */
+    private readonly runtimeConfig?: unknown,
   ) {}
 
   private throttlerFor(taskId: string): Throttler {
@@ -72,7 +80,7 @@ export class TelegramNotifier {
 
   /** Lazy-load the telegram SDK once and reuse. */
   private sdk(): Promise<TelegramSdk | null> {
-    if (!this.sdkPromise) this.sdkPromise = loadTelegramSdk(this.logger);
+    if (!this.sdkPromise) this.sdkPromise = loadTelegramSdk(this.logger, this.runtimeConfig);
     return this.sdkPromise;
   }
 
